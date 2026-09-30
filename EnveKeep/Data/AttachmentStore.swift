@@ -17,16 +17,9 @@ struct AttachmentStore: Sendable {
             let type = (try? source.resourceValues(forKeys: [.contentTypeKey]).contentType)
                 ?? UTType(filenameExtension: source.pathExtension)
             let target = url(for: newFileName(extension: Self.fileExtension(for: source.pathExtension, type: type)))
-            var coordinatorError: NSError?
-            var copyError: Error?
-            NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinatorError) { readable in
-                do {
-                    try FileManager.default.copyItem(at: readable, to: target)
-                } catch {
-                    copyError = error
-                }
-            }
-            if let error = coordinatorError ?? copyError {
+            do {
+                try Self.coordinatedRead(source) { try FileManager.default.copyItem(at: $0, to: target) }
+            } catch {
                 try? FileManager.default.removeItem(at: target)
                 throw error
             }
@@ -34,18 +27,44 @@ struct AttachmentStore: Sendable {
         }.value
     }
 
+    /// Reads a user-picked image file and stores it as JPEG, like a photo.
+    func importImage(at source: URL) async throws -> Attachment {
+        let data = try await Task.detached(priority: .userInitiated) {
+            let scoped = source.startAccessingSecurityScopedResource()
+            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+            var data = Data()
+            try Self.coordinatedRead(source) { data = try Data(contentsOf: $0) }
+            return data
+        }.value
+        let name = source.deletingPathExtension().lastPathComponent + ".jpg"
+        return try await importPhoto(data, displayName: name)
+    }
+
     /// Stores photos as JPEG so they open everywhere, including older Android devices without HEIC support.
-    func importPhoto(_ data: Data) async throws -> Attachment {
+    func importPhoto(_ data: Data, displayName: String? = nil) async throws -> Attachment {
         try await Task.detached(priority: .userInitiated) { [self] in
             let jpeg = try Self.jpegData(from: data)
             let c = Calendar.gregorian.dateComponents([.year, .month, .day, .hour, .minute, .second], from: .now)
-            let name = String(
+            let name = displayName ?? String(
                 format: "Photo %04d-%02d-%02d %02d%02d%02d.jpg", c.year!, c.month!, c.day!, c.hour!, c.minute!, c.second!
             )
             let target = url(for: newFileName(extension: "jpg"))
             try jpeg.write(to: target, options: .completeFileProtectionUntilFirstUserAuthentication)
             return try attachment(for: target, displayName: name, type: .jpeg)
         }.value
+    }
+
+    private static func coordinatedRead(_ source: URL, _ read: (URL) throws -> Void) throws {
+        var coordinatorError: NSError?
+        var readError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinatorError) { readable in
+            do {
+                try read(readable)
+            } catch {
+                readError = error
+            }
+        }
+        if let error = coordinatorError ?? readError { throw error }
     }
 
     private static func jpegData(from data: Data) throws -> Data {

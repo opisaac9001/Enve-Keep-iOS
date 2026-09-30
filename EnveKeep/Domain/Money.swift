@@ -33,6 +33,13 @@ enum Money {
         return AmountCoding.parse(normalized)
     }
 
+    /// Like `parse`, but allows a leading minus sign for discounts and refunds.
+    static func parseSigned(_ text: String, locale: Locale = .current) -> Decimal? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let sign = trimmed.first, "-−".contains(sign) else { return parse(trimmed, locale: locale) }
+        return parse(String(trimmed.dropFirst()), locale: locale).map { -$0 }
+    }
+
     static func format(_ amount: Decimal, currency: String) -> String {
         amount.formatted(.currency(code: currency))
     }

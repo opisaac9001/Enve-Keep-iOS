@@ -50,9 +50,36 @@ struct Document: Identifiable, Hashable, Sendable {
     var notes = ""
 }
 
+struct ReceiptItem: Hashable, Sendable {
+    var description: String
+    var quantity: Decimal?
+    /// Line total; discounts and returns are negative.
+    var amount: Decimal?
+}
+
+/// Receipts are iOS-only and travel in version 2 backups, which Enve Keep for Android rejects as newer.
+struct Receipt: Identifiable, Hashable, Sendable {
+    var id: Int64 = 0
+    var merchant: String
+    var purchaseDate: Day?
+    var currency: String
+    var items: [ReceiptItem] = []
+    var subtotal: Decimal?
+    var tax: Decimal?
+    var tip: Decimal?
+    var total: Decimal?
+    var category = ""
+    var tags: [String] = []
+    var notes = ""
+    /// On-device OCR output per scanned page, keyed by the page attachment's file name.
+    var recognizedText: [String: String] = [:]
+    var addedOn: Day
+}
+
 enum OwnerType: String, Codable, Sendable {
     case product = "PRODUCT"
     case document = "DOCUMENT"
+    case receipt = "RECEIPT"
 }
 
 struct Attachment: Identifiable, Hashable, Sendable {
@@ -221,6 +248,60 @@ extension Document: Codable {
         try c.put(issuedOn, "issuedOn")
         try c.put(expiresOn, "expiresOn")
         try c.put(notes, "notes")
+    }
+}
+
+extension ReceiptItem: Codable {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: JSONKey.self)
+        description = try c.value("description", default: "")
+        quantity = try c.amount("quantity")
+        amount = try c.amount("amount")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: JSONKey.self)
+        try c.put(description, "description")
+        try c.putAmount(quantity, "quantity")
+        try c.putAmount(amount, "amount")
+    }
+}
+
+extension Receipt: Codable {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: JSONKey.self)
+        id = try c.value("id", default: 0)
+        merchant = try c.required("merchant")
+        purchaseDate = try c.value("purchaseDate", default: nil)
+        currency = try c.required("currency")
+        items = try c.value("items", default: [])
+        subtotal = try c.amount("subtotal")
+        tax = try c.amount("tax")
+        tip = try c.amount("tip")
+        total = try c.amount("total")
+        category = try c.value("category", default: "")
+        tags = try c.value("tags", default: [])
+        notes = try c.value("notes", default: "")
+        recognizedText = try c.value("recognizedText", default: [:])
+        addedOn = try c.required("addedOn")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: JSONKey.self)
+        try c.put(id, "id")
+        try c.put(merchant, "merchant")
+        try c.put(purchaseDate, "purchaseDate")
+        try c.put(currency, "currency")
+        try c.put(items, "items")
+        try c.putAmount(subtotal, "subtotal")
+        try c.putAmount(tax, "tax")
+        try c.putAmount(tip, "tip")
+        try c.putAmount(total, "total")
+        try c.put(category, "category")
+        try c.put(tags, "tags")
+        try c.put(notes, "notes")
+        try c.put(recognizedText, "recognizedText")
+        try c.put(addedOn, "addedOn")
     }
 }
 

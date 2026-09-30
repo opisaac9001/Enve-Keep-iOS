@@ -10,8 +10,9 @@ struct SearchResultsSection: View {
         let products = data.products.filter { $0.matches(query) }
         let subscriptions = data.subscriptions.filter { $0.matches(query) }
         let documents = data.documents.filter { $0.matches(query) }
+        let receipts = data.receipts.filter { $0.matches(query) }
 
-        if products.isEmpty && subscriptions.isEmpty && documents.isEmpty {
+        if products.isEmpty && subscriptions.isEmpty && documents.isEmpty && receipts.isEmpty {
             ContentUnavailableView.search(text: query)
                 .listRowBackground(Color.clear)
         }
@@ -46,6 +47,15 @@ struct SearchResultsSection: View {
                             status: deadlineStatus(document.expiresOn, today: store.today, leadDays: data.settings.documentLeadDays),
                             today: store.today
                         )
+                    }
+                }
+            }
+        }
+        if !receipts.isEmpty {
+            Section("Receipts") {
+                ForEach(receipts) { receipt in
+                    NavigationLink(value: Route.receipt(receipt.id)) {
+                        ReceiptRow(receipt: receipt)
                     }
                 }
             }

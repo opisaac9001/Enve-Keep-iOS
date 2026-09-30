@@ -5,8 +5,26 @@ struct KeepData: Codable, Hashable, Sendable {
     var products: [Product] = []
     var subscriptions: [Subscription] = []
     var documents: [Document] = []
+    var receipts: [Receipt] = []
     var attachments: [Attachment] = []
     var settings = Settings()
+
+    private enum CodingKeys: String, CodingKey {
+        case products, subscriptions, documents, receipts, attachments, settings
+    }
+}
+
+extension KeepData {
+    // keep.json files written before receipts existed have no "receipts" key.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        products = try c.decode([Product].self, forKey: .products)
+        subscriptions = try c.decode([Subscription].self, forKey: .subscriptions)
+        documents = try c.decode([Document].self, forKey: .documents)
+        receipts = try c.decodeIfPresent([Receipt].self, forKey: .receipts) ?? []
+        attachments = try c.decode([Attachment].self, forKey: .attachments)
+        settings = try c.decode(Settings.self, forKey: .settings)
+    }
 }
 
 /// All records live in one JSON file written atomically; attachment files sit beside it.
@@ -60,6 +78,7 @@ final class KeepStore {
     func product(_ id: Int64) -> Product? { data.products.first { $0.id == id } }
     func subscription(_ id: Int64) -> Subscription? { data.subscriptions.first { $0.id == id } }
     func document(_ id: Int64) -> Document? { data.documents.first { $0.id == id } }
+    func receipt(_ id: Int64) -> Receipt? { data.receipts.first { $0.id == id } }
 
     func attachments(_ ownerType: OwnerType, _ ownerId: Int64) -> [Attachment] {
         data.attachments.filter { $0.ownerType == ownerType && $0.ownerId == ownerId }
@@ -76,6 +95,19 @@ final class KeepStore {
     func saveDocument(_ document: Document, added: [Attachment], removed: [Attachment]) throws -> Int64 {
         try saveOwned(.document, added: added, removed: removed) { data in
             upsert(document, into: &data.documents)
+        }
+    }
+
+    /// Recognized text is kept only for pages that remain attached after the save.
+    @discardableResult
+    func saveReceipt(_ receipt: Receipt, added: [Attachment], removed: [Attachment]) throws -> Int64 {
+        let removedFiles = Set(removed.map(\.fileName))
+        let pages = Set(attachments(.receipt, receipt.id).map(\.fileName).filter { !removedFiles.contains($0) })
+            .union(added.map(\.fileName))
+        var pruned = receipt
+        pruned.recognizedText = receipt.recognizedText.filter { pages.contains($0.key) }
+        return try saveOwned(.receipt, added: added, removed: removed) { data in
+            upsert(pruned, into: &data.receipts)
         }
     }
 
@@ -97,6 +129,10 @@ final class KeepStore {
 
     func deleteDocument(_ id: Int64) throws {
         try deleteOwned(.document, id) { $0.documents.removeAll { $0.id == id } }
+    }
+
+    func deleteReceipt(_ id: Int64) throws {
+        try deleteOwned(.receipt, id) { $0.receipts.removeAll { $0.id == id } }
     }
 
     func deleteSubscription(_ id: Int64) throws {
@@ -171,6 +207,7 @@ private protocol Record: Identifiable where ID == Int64 {
 extension Product: Record {}
 extension Subscription: Record {}
 extension Document: Record {}
+extension Receipt: Record {}
 
 private func nextId<T: Identifiable>(_ items: [T]) -> Int64 where T.ID == Int64 {
     (items.map(\.id).max() ?? 0) + 1

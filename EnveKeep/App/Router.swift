@@ -1,13 +1,14 @@
 import SwiftUI
 
 enum AppTab: Hashable {
-    case home, warranties, subscriptions, documents
+    case home, warranties, subscriptions, documents, receipts
 }
 
 enum Route: Hashable {
     case product(Int64)
     case subscription(Int64)
     case document(Int64)
+    case receipt(Int64)
     case settings
 
     init(_ kind: RecordKind, id: Int64) {
@@ -27,6 +28,7 @@ final class Router {
     var warrantiesPath: [Route] = []
     var subscriptionsPath: [Route] = []
     var documentsPath: [Route] = []
+    var receiptsPath: [Route] = []
 
     /// Opens a record from outside the app, such as a tapped reminder.
     func open(_ kind: RecordKind, id: Int64) {

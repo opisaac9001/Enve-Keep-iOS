@@ -99,7 +99,7 @@ struct SettingsView: View {
             } header: {
                 Text("Backup")
             } footer: {
-                Text("Export saves every record, attachment and setting to a single ZIP file you choose. Import replaces everything on this iPhone with the contents of a backup. Backups work with Enve Keep for Android too.")
+                Text("Export saves every record, receipt, attachment and setting to a single ZIP file you choose. Import replaces everything on this iPhone with the contents of a backup. Backups without receipts work with Enve Keep for Android too. Once you keep receipts, backups use a newer format that Enve Keep for Android can't import.")
             }
             .disabled(busy)
 
@@ -120,7 +120,7 @@ struct SettingsView: View {
             Button("Replace", role: .destructive) { commit(staged) }
             Button("Cancel", role: .cancel) { BackupService(store: store).discard(staged) }
         } message: { staged in
-            Text("Everything currently in Enve Keep will be replaced by the backup (\(Formats.count(staged.recordCount, "record", "records")), \(Formats.count(staged.manifest.attachments.count, "attachment", "attachments"))). Export first if you want to keep a copy.")
+            Text("Everything currently in Enve Keep will be replaced by the backup (\(Formats.count(staged.recordCount, "record", "records")), \(Formats.count(staged.attachmentCount, "attachment", "attachments"))). Export first if you want to keep a copy.")
         }
         .alert(notice ?? "", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("OK") {}
@@ -201,7 +201,7 @@ struct SettingsView: View {
         do {
             try BackupService(store: store).commit(staged)
             reminders?.reset()
-            notice = String(localized: "Restored \(Formats.count(staged.recordCount, "record", "records")) and \(Formats.count(staged.manifest.attachments.count, "attachment", "attachments"))")
+            notice = String(localized: "Restored \(Formats.count(staged.recordCount, "record", "records")) and \(Formats.count(staged.attachmentCount, "attachment", "attachments"))")
         } catch {
             errorMessage = String(localized: "The backup could not be restored. Nothing was changed. \(error.localizedDescription)")
         }

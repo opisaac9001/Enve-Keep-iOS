@@ -194,7 +194,7 @@ struct BackupArchiveTests {
         }
 
         var newer = TestZip()
-        newer.add(BackupArchive.manifestName, #"{"format":"enve-keep-backup","version":2,"exportedAt":"x"}"#)
+        newer.add(BackupArchive.manifestName, #"{"format":"enve-keep-backup","version":3,"exportedAt":"x"}"#)
         #expect(throws: BackupError.self) {
             try BackupArchive.read(from: newer.write(in: directory), staging: directory.appending(path: "b"))
         }

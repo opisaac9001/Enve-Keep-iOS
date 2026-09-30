@@ -1,34 +1,41 @@
 import Foundation
 import ZIPFoundation
 
+/// Version 2 keeps receipt pages separate so Android can reject the newer manifest cleanly.
 struct BackupManifest: Hashable, Sendable {
     static let format = "enve-keep-backup"
-    static let version = 1
+    static let androidVersion = 1
+    static let receiptsVersion = 2
 
     var format = BackupManifest.format
-    var version = BackupManifest.version
+    var version = BackupManifest.androidVersion
     var exportedAt: String
     var products: [Product] = []
     var subscriptions: [Subscription] = []
     var documents: [Document] = []
     var attachments: [Attachment] = []
+    var receipts: [Receipt] = []
+    var receiptAttachments: [Attachment] = []
     var settings: Settings?
 }
 
 extension BackupManifest: Codable {
     private enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, products, subscriptions, documents, attachments, settings
+        case format, version, exportedAt, products, subscriptions, documents, attachments, receipts,
+             receiptAttachments, settings
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         format = try c.decodeIfPresent(String.self, forKey: .format) ?? Self.format
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.version
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.androidVersion
         exportedAt = try c.decode(String.self, forKey: .exportedAt)
         products = try c.decodeIfPresent([Product].self, forKey: .products) ?? []
         subscriptions = try c.decodeIfPresent([Subscription].self, forKey: .subscriptions) ?? []
         documents = try c.decodeIfPresent([Document].self, forKey: .documents) ?? []
         attachments = try c.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
+        receipts = try c.decodeIfPresent([Receipt].self, forKey: .receipts) ?? []
+        receiptAttachments = try c.decodeIfPresent([Attachment].self, forKey: .receiptAttachments) ?? []
         settings = try c.decodeIfPresent(Settings.self, forKey: .settings)
     }
 
@@ -41,6 +48,10 @@ extension BackupManifest: Codable {
         try c.encode(subscriptions, forKey: .subscriptions)
         try c.encode(documents, forKey: .documents)
         try c.encode(attachments, forKey: .attachments)
+        if version >= Self.receiptsVersion {
+            try c.encode(receipts, forKey: .receipts)
+            try c.encode(receiptAttachments, forKey: .receiptAttachments)
+        }
         try c.encode(settings, forKey: .settings)
     }
 }
@@ -81,7 +92,7 @@ enum BackupArchive {
         ) { position, size in
             json.subdata(in: Int(position)..<Int(position) + size)
         }
-        for attachment in manifest.attachments {
+        for attachment in manifest.attachments + manifest.receiptAttachments {
             try archive.addEntry(
                 with: attachmentPrefix + attachment.fileName,
                 fileURL: attachmentsDirectory.appending(path: attachment.fileName),
@@ -162,7 +173,7 @@ enum BackupArchive {
             throw BackupError.invalid("Unreadable manifest")
         }
         try validate(manifest, files: extracted)
-        let referenced = Set(manifest.attachments.map(\.fileName))
+        let referenced = Set((manifest.attachments + manifest.receiptAttachments).map(\.fileName))
         for stray in extracted.subtracting(referenced) {
             try? fileManager.removeItem(at: attachmentsDir.appending(path: stray))
         }
@@ -171,34 +182,52 @@ enum BackupArchive {
 
     static func validate(_ manifest: BackupManifest, files: Set<String>) throws {
         guard manifest.format == BackupManifest.format else { throw BackupError.invalid("Not an Enve Keep backup") }
-        guard manifest.version <= BackupManifest.version else {
+        guard manifest.version <= BackupManifest.receiptsVersion else {
             throw BackupError.invalid("Backup was made by a newer version of Enve Keep")
         }
+        guard manifest.version >= BackupManifest.receiptsVersion
+                || (manifest.receipts.isEmpty && manifest.receiptAttachments.isEmpty)
+        else { throw BackupError.invalid("Receipts need backup version \(BackupManifest.receiptsVersion)") }
         func requireUnique(_ ids: [Int64], _ label: String) throws {
             guard Set(ids).count == ids.count, ids.allSatisfy({ $0 > 0 }) else {
                 throw BackupError.invalid("Invalid \(label) ids")
             }
         }
+        let allAttachments = manifest.attachments + manifest.receiptAttachments
         try requireUnique(manifest.products.map(\.id), "product")
         try requireUnique(manifest.subscriptions.map(\.id), "subscription")
         try requireUnique(manifest.documents.map(\.id), "document")
-        try requireUnique(manifest.attachments.map(\.id), "attachment")
+        try requireUnique(manifest.receipts.map(\.id), "receipt")
+        try requireUnique(allAttachments.map(\.id), "attachment")
         let productIds = Set(manifest.products.map(\.id))
         let documentIds = Set(manifest.documents.map(\.id))
+        let receiptIds = Set(manifest.receipts.map(\.id))
         for attachment in manifest.attachments {
             let ownerExists = switch attachment.ownerType {
             case .product: productIds.contains(attachment.ownerId)
             case .document: documentIds.contains(attachment.ownerId)
+            case .receipt: false
             }
             guard ownerExists, files.contains(attachment.fileName) else {
                 throw BackupError.invalid("Attachment \(attachment.displayName) is missing")
             }
         }
-        guard Set(manifest.attachments.map(\.fileName)).count == manifest.attachments.count else {
+        for attachment in manifest.receiptAttachments {
+            guard attachment.ownerType == .receipt, receiptIds.contains(attachment.ownerId),
+                  files.contains(attachment.fileName)
+            else { throw BackupError.invalid("Receipt page \(attachment.displayName) is missing") }
+        }
+        guard Set(allAttachments.map(\.fileName)).count == allAttachments.count else {
             throw BackupError.invalid("Duplicate attachment files")
         }
         guard manifest.subscriptions.allSatisfy({ $0.cycleCount >= 1 }) else {
             throw BackupError.invalid("Invalid billing cycle")
+        }
+        for receipt in manifest.receipts {
+            let pages = Set(manifest.receiptAttachments.filter { $0.ownerId == receipt.id }.map(\.fileName))
+            guard Money.isValidCurrency(receipt.currency), Set(receipt.recognizedText.keys).isSubset(of: pages) else {
+                throw BackupError.invalid("Invalid receipt \(receipt.merchant)")
+            }
         }
     }
 }

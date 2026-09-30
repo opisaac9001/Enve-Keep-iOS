@@ -32,6 +32,12 @@ struct RootView: View {
             }
             .tabItem { Label("Documents", systemImage: RecordKind.document.symbol) }
             .tag(AppTab.documents)
+
+            NavigationStack(path: $router.receiptsPath) {
+                ReceiptListView().routeDestinations()
+            }
+            .tabItem { Label("Receipts", systemImage: Receipt.symbol) }
+            .tag(AppTab.receipts)
         }
         .preferredColorScheme(store.settings.themeMode.colorScheme)
         .task(id: store.data) {
@@ -55,6 +61,7 @@ private extension View {
             case .product(let id): ProductDetailView(productId: id)
             case .subscription(let id): SubscriptionDetailView(subscriptionId: id)
             case .document(let id): DocumentDetailView(documentId: id)
+            case .receipt(let id): ReceiptDetailView(receiptId: id)
             case .settings: SettingsView()
             }
         }

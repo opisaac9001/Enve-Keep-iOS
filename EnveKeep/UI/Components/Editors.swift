@@ -55,6 +55,7 @@ struct AddRecordMenu: View {
 /// Cancel/Save toolbar with a discard confirmation that protects unsaved edits.
 struct EditToolbar: ToolbarContent {
     let hasChanges: Bool
+    var canSave = true
     @Binding var confirmDiscard: Bool
     let onDiscard: () -> Void
     let onSave: () -> Void
@@ -72,6 +73,7 @@ struct EditToolbar: ToolbarContent {
         }
         ToolbarItem(placement: .confirmationAction) {
             Button("Save", action: onSave)
+                .disabled(!canSave)
         }
     }
 }

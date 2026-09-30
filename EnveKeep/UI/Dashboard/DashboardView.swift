@@ -41,7 +41,7 @@ struct DashboardSummary {
         warranties = category(.warranty, count: data.products.count)
         subscriptions = category(.subscription, count: data.subscriptions.filter(\.isActive).count)
         documents = category(.document, count: data.documents.count)
-        isEmpty = data.products.isEmpty && data.subscriptions.isEmpty && data.documents.isEmpty
+        isEmpty = data.products.isEmpty && data.subscriptions.isEmpty && data.documents.isEmpty && data.receipts.isEmpty
     }
 }
 
@@ -60,7 +60,7 @@ struct DashboardView: View {
             if !query.isEmpty {
                 SearchResultsSection(query: query)
             } else if summary.isEmpty {
-                WelcomeSection { editor = Editor(new: $0) }
+                WelcomeSection(onAdd: { editor = Editor(new: $0) }, onReceipts: { router.tab = .receipts })
             } else {
                 if showReminderPrompt {
                     ReminderPromptSection(onAllow: allowReminders, onDismiss: dismissReminderPrompt)
@@ -143,6 +143,7 @@ struct DashboardView: View {
 
 private struct WelcomeSection: View {
     let onAdd: (RecordKind) -> Void
+    let onReceipts: () -> Void
 
     var body: some View {
         Section {
@@ -163,15 +164,18 @@ private struct WelcomeSection: View {
             addButton(.warranty, title: "Product and warranty", hint: "Receipt, serial number and warranty")
             addButton(.subscription, title: "Subscription", hint: "Price, billing cycle and next renewal")
             addButton(.document, title: "Document", hint: "Passport, licence, insurance or ID")
+            addButton(symbol: Receipt.symbol, title: "Receipt", hint: "Scan and organize receipts and expenses", action: onReceipts)
         }
     }
 
     private func addButton(_ kind: RecordKind, title: LocalizedStringKey, hint: LocalizedStringKey) -> some View {
-        Button {
-            onAdd(kind)
-        } label: {
+        addButton(symbol: kind.symbol, title: title, hint: hint) { onAdd(kind) }
+    }
+
+    private func addButton(symbol: String, title: LocalizedStringKey, hint: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: kind.symbol)
+                Image(systemName: symbol)
                     .frame(width: 36, height: 36)
                     .background(Color.keepPrimaryContainer, in: RoundedRectangle(cornerRadius: 10))
                     .foregroundStyle(Color.keepOnPrimaryContainer)
@@ -229,6 +233,10 @@ private struct OverviewSection: View {
                 count: Formats.count(summary.subscriptions.count, "active subscription", "active subscriptions"))
             row(.document, tab: .documents, category: summary.documents,
                 count: Formats.count(summary.documents.count, "document", "documents"))
+            let latest = store.data.receipts.max { ($0.sortDate, $0.id) < ($1.sortDate, $1.id) }
+            row(symbol: Receipt.symbol, tab: .receipts,
+                count: Formats.count(store.data.receipts.count, "receipt", "receipts"),
+                detail: latest.map { String(localized: "Latest: \($0.merchant)") })
             let totals = Renewals.monthlyTotals(store.data.subscriptions)
             if !totals.isEmpty {
                 LabeledContent("Monthly cost") {
@@ -243,18 +251,24 @@ private struct OverviewSection: View {
     }
 
     private func row(_ kind: RecordKind, tab: AppTab, category: DashboardSummary.Category, count: String) -> some View {
+        row(symbol: kind.symbol, tab: tab, count: count, detail: category.next.map { next in
+            String(localized: "Next: \(next.title), \(Formats.relativeDays(next.days(from: store.today)))")
+        })
+    }
+
+    private func row(symbol: String, tab: AppTab, count: String, detail: String?) -> some View {
         Button {
             router.tab = tab
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: kind.symbol)
+                Image(systemName: symbol)
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(count).foregroundStyle(.primary)
-                    if let next = category.next {
-                        Text("Next: \(next.title), \(Formats.relativeDays(next.days(from: store.today)))")
+                    if let detail {
+                        Text(detail)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

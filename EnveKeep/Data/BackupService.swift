@@ -5,7 +5,10 @@ struct StagedImport: Identifiable, Sendable {
     let manifest: BackupManifest
     let staging: URL
 
-    var recordCount: Int { manifest.products.count + manifest.subscriptions.count + manifest.documents.count }
+    var recordCount: Int {
+        manifest.products.count + manifest.subscriptions.count + manifest.documents.count + manifest.receipts.count
+    }
+    var attachmentCount: Int { manifest.attachments.count + manifest.receiptAttachments.count }
 }
 
 @MainActor
@@ -15,14 +18,19 @@ struct BackupService {
     private var stagingRoot: URL { store.root.appending(path: "import-staging", directoryHint: .isDirectory) }
     private nonisolated static let previousName = "attachments-previous"
 
+    /// Writes the Android-compatible version 1 format unless receipts require version 2.
     func export() async throws -> URL {
+        let data = store.data
         let manifest = BackupManifest(
+            version: data.receipts.isEmpty ? BackupManifest.androidVersion : BackupManifest.receiptsVersion,
             exportedAt: Date.now.formatted(.iso8601),
-            products: store.data.products,
-            subscriptions: store.data.subscriptions,
-            documents: store.data.documents,
-            attachments: store.data.attachments,
-            settings: store.data.settings
+            products: data.products,
+            subscriptions: data.subscriptions,
+            documents: data.documents,
+            attachments: data.attachments.filter { $0.ownerType != .receipt },
+            receipts: data.receipts,
+            receiptAttachments: data.attachments.filter { $0.ownerType == .receipt },
+            settings: data.settings
         )
         let folder = FileManager.default.temporaryDirectory.appending(path: "export", directoryHint: .isDirectory)
         let destination = folder.appending(path: "enve-keep-backup-\(store.today.iso).zip")
@@ -76,7 +84,8 @@ struct BackupService {
             products: staged.manifest.products,
             subscriptions: staged.manifest.subscriptions,
             documents: staged.manifest.documents,
-            attachments: staged.manifest.attachments,
+            receipts: staged.manifest.receipts,
+            attachments: staged.manifest.attachments + staged.manifest.receiptAttachments,
             settings: store.settings
         )
         if var settings = staged.manifest.settings {
