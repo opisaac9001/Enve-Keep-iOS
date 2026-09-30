@@ -88,6 +88,11 @@ enum Search {
         return terms.allSatisfy { haystack.contains($0) }
     }
 
+    /// Folded and single-spaced, so "San  Francisco" and "san francisco" count as the same value.
+    static func key(_ text: String) -> String {
+        fold(text).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     private static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }

@@ -84,10 +84,46 @@ final class KeepStore {
         data.attachments.filter { $0.ownerType == ownerType && $0.ownerId == ownerId }
     }
 
+    func receiptCovering(_ productId: Int64) -> Receipt? {
+        data.receipts.first { $0.productIds.contains(productId) }
+    }
+
+    func products(coveredBy receipt: Receipt) -> [Product] {
+        receipt.productIds.compactMap(product)
+    }
+
+    /// Page file names of every receipt, in page order.
+    var receiptPages: [Int64: [String]] {
+        Dictionary(grouping: data.attachments.filter { $0.ownerType == .receipt }, by: \.ownerId)
+            .mapValues { $0.map(\.fileName) }
+    }
+
+    /// Saves the product and makes `receiptId` its only linked receipt, or unlinks it when nil.
     @discardableResult
-    func saveProduct(_ product: Product, added: [Attachment], removed: [Attachment]) throws -> Int64 {
+    func saveProduct(_ product: Product, added: [Attachment], removed: [Attachment], receiptId: Int64?) throws -> Int64 {
         try saveOwned(.product, added: added, removed: removed) { data in
-            upsert(product, into: &data.products)
+            let id = upsert(product, into: &data.products)
+            link(id, to: receiptId, in: &data)
+            return id
+        }
+    }
+
+    func linkProduct(_ productId: Int64, toReceipt receiptId: Int64?) throws {
+        try mutate { link(productId, to: receiptId, in: &$0) }
+    }
+
+    /// Resolves every current review flag; they come back only if the values behind them change.
+    func markReviewed(_ receiptId: Int64) throws {
+        guard let receipt = receipt(receiptId) else { return }
+        let pages = attachments(.receipt, receiptId).map(\.fileName)
+        let flags = ReceiptReview.flags(for: receipt, pages: pages, among: data.receipts)
+        try setResolvedFlags(flags.map(\.id), forReceipt: receiptId)
+    }
+
+    func setResolvedFlags(_ flags: [String], forReceipt receiptId: Int64) throws {
+        try mutate { data in
+            guard let index = data.receipts.firstIndex(where: { $0.id == receiptId }) else { return }
+            data.receipts[index].resolvedFlags = flags
         }
     }
 
@@ -98,7 +134,7 @@ final class KeepStore {
         }
     }
 
-    /// Recognized text is kept only for pages that remain attached after the save.
+    /// Per-page scan data is kept only for pages that remain attached after the save.
     @discardableResult
     func saveReceipt(_ receipt: Receipt, added: [Attachment], removed: [Attachment]) throws -> Int64 {
         let removedFiles = Set(removed.map(\.fileName))
@@ -106,6 +142,8 @@ final class KeepStore {
             .union(added.map(\.fileName))
         var pruned = receipt
         pruned.recognizedText = receipt.recognizedText.filter { pages.contains($0.key) }
+        pruned.pageConfidence = receipt.pageConfidence.filter { pages.contains($0.key) }
+        pruned.pageDigests = receipt.pageDigests.filter { pages.contains($0.key) }
         return try saveOwned(.receipt, added: added, removed: removed) { data in
             upsert(pruned, into: &data.receipts)
         }
@@ -124,7 +162,10 @@ final class KeepStore {
     }
 
     func deleteProduct(_ id: Int64) throws {
-        try deleteOwned(.product, id) { $0.products.removeAll { $0.id == id } }
+        try deleteOwned(.product, id) { data in
+            data.products.removeAll { $0.id == id }
+            link(id, to: nil, in: &data)
+        }
     }
 
     func deleteDocument(_ id: Int64) throws {
@@ -150,6 +191,27 @@ final class KeepStore {
 
     func deleteOrphanedAttachments() {
         attachmentStore.deleteOrphans(referenced: Set(data.attachments.map(\.fileName)))
+    }
+
+    /// Fills in page digests for receipts scanned before digests were recorded or restored from such backups.
+    func backfillPageDigests() async {
+        let missing = data.attachments.filter { page in
+            page.ownerType == .receipt && receipt(page.ownerId)?.pageDigests[page.fileName] == nil
+        }
+        var digests: [String: String] = [:]
+        for page in missing {
+            digests[page.fileName] = try? await attachmentStore.digest(of: page.fileName)
+        }
+        guard !digests.isEmpty else { return }
+        try? mutate { data in
+            for (fileName, digest) in digests {
+                guard let page = data.attachments.first(where: { $0.fileName == fileName }), page.ownerType == .receipt,
+                      let index = data.receipts.firstIndex(where: { $0.id == page.ownerId }),
+                      data.receipts[index].pageDigests[fileName] == nil
+                else { continue }
+                data.receipts[index].pageDigests[fileName] = digest
+            }
+        }
     }
 
     // MARK: - Private
@@ -211,6 +273,16 @@ extension Receipt: Record {}
 
 private func nextId<T: Identifiable>(_ items: [T]) -> Int64 where T.ID == Int64 {
     (items.map(\.id).max() ?? 0) + 1
+}
+
+private func link(_ productId: Int64, to receiptId: Int64?, in data: inout KeepData) {
+    guard data.receipts.first(where: { $0.productIds.contains(productId) })?.id != receiptId else { return }
+    for index in data.receipts.indices {
+        data.receipts[index].productIds.removeAll { $0 == productId }
+    }
+    if let receiptId, let index = data.receipts.firstIndex(where: { $0.id == receiptId }) {
+        data.receipts[index].productIds.append(productId)
+    }
 }
 
 private func upsert<T: Record>(_ record: T, into items: inout [T]) -> Int64 {

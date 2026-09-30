@@ -8,6 +8,9 @@ struct ProductDetailView: View {
     @State private var confirmDelete = false
     @State private var errorMessage: String?
     @State private var openedAttachment: OpenedAttachment?
+    @State private var pickingReceipt = false
+    @State private var confirmPacketWithoutReceipt = false
+    @State private var preparingPacket = false
 
     var body: some View {
         if let product = store.product(productId) {
@@ -38,15 +41,16 @@ struct ProductDetailView: View {
                     DetailField("Price", product.price.map { Money.format($0, currency: product.currency) } ?? "")
                 }
             }
+            receiptSection
             if !product.notes.isEmpty {
                 Section("Notes") {
                     Text(product.notes).textSelection(.enabled)
                 }
             }
-            Section("Receipts and files") {
+            Section("Files and photos") {
                 AttachmentGallery(
                     attachments: store.attachments(.product, productId),
-                    emptyText: "No receipts or photos. Edit the product to add them.",
+                    emptyText: "No files or photos. Edit the product to add them.",
                     opened: $openedAttachment,
                     errorMessage: $errorMessage
                 )
@@ -60,12 +64,40 @@ struct ProductDetailView: View {
         .navigationTitle(product.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ShareLink(item: shareText(product), subject: Text("Product details: \(product.name)")) {
-                Label("Share details", systemImage: "square.and.arrow.up")
+            Menu {
+                ShareLink(item: shareText(product), subject: Text("Product details: \(product.name)")) {
+                    Label("Share details", systemImage: "text.alignleft")
+                }
+                Button("Claim packet (PDF)", systemImage: "doc.richtext") {
+                    if store.receiptCovering(productId) == nil {
+                        confirmPacketWithoutReceipt = true
+                    } else {
+                        makeClaimPacket()
+                    }
+                }
+                .disabled(preparingPacket)
+            } label: {
+                Label("Share", systemImage: "square.and.arrow.up")
             }
             Button("Edit") { editor = .product(productId) }
         }
         .editorSheet($editor)
+        .sheet(isPresented: $pickingReceipt) {
+            NavigationStack {
+                ReceiptPicker(selection: store.receiptCovering(productId)?.id) { link($0) }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { pickingReceipt = false }
+                        }
+                    }
+            }
+        }
+        .confirmationDialog("No receipt is linked", isPresented: $confirmPacketWithoutReceipt, titleVisibility: .visible) {
+            Button("Link a receipt") { pickingReceipt = true }
+            Button("Create without receipt") { makeClaimPacket() }
+        } message: {
+            Text("The claim packet will contain only the product summary. Link the purchase receipt to include its scans as proof of purchase.")
+        }
         .confirmationDialog("Delete \(product.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 do {
@@ -76,9 +108,66 @@ struct ProductDetailView: View {
                 }
             }
         } message: {
-            Text("The product and its receipts and photos will be removed from this device.")
+            Text("The product and its files and photos will be removed from this device. A linked receipt is kept.")
         }
         .errorAlert($errorMessage)
+    }
+
+    @ViewBuilder
+    private var receiptSection: some View {
+        Section {
+            if let receipt = store.receiptCovering(productId) {
+                NavigationLink(value: Route.receipt(receipt.id)) {
+                    ReceiptRow(receipt: receipt)
+                }
+                .swipeActions {
+                    Button("Unlink", systemImage: "link.badge.minus") { link(nil) }
+                        .tint(Color.keepSoon)
+                }
+                .contextMenu {
+                    Button("Change receipt", systemImage: "arrow.triangle.swap") { pickingReceipt = true }
+                    Button("Unlink", systemImage: "link.badge.minus", role: .destructive) { link(nil) }
+                }
+            } else {
+                Button("Link a receipt", systemImage: "link") { pickingReceipt = true }
+            }
+        } header: {
+            Text("Receipt")
+        } footer: {
+            if store.receiptCovering(productId) == nil {
+                Text("Link the purchase receipt so it's ready as proof of purchase for a claim.")
+            }
+        }
+    }
+
+    private func link(_ receiptId: Int64?) {
+        do {
+            try store.linkProduct(productId, toReceipt: receiptId)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func makeClaimPacket() {
+        guard let product = store.product(productId) else { return }
+        let receipt = store.receiptCovering(productId)
+        let pages = receipt.map { store.attachments(.receipt, $0.id).filter(\.isImage) } ?? []
+        let packet = ClaimPacket(
+            product: product,
+            receipt: receipt,
+            receiptPages: pages.map { store.attachmentStore.url(for: $0.fileName) },
+            today: store.today
+        )
+        preparingPacket = true
+        Task {
+            defer { preparingPacket = false }
+            do {
+                let url = try await Task.detached(priority: .userInitiated) { try packet.write() }.value
+                openedAttachment = OpenedAttachment(url: url, share: false)
+            } catch {
+                errorMessage = String(localized: "The claim packet could not be created. \(error.localizedDescription)")
+            }
+        }
     }
 
     private func shareText(_ product: Product) -> String {

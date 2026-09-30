@@ -3,11 +3,17 @@ import Foundation
 import ImageIO
 import Vision
 
+struct RecognizedPage: Sendable {
+    let text: String
+    /// Mean of Vision's top-candidate confidences, or nil when nothing was recognized.
+    let confidence: Double?
+}
+
 /// On-device text recognition with Apple Vision. Results can contain mistakes, especially for handwriting.
 enum TextRecognizer {
     private static let maxPixelSize = 4096
 
-    static func recognizeText(inImageAt url: URL) async throws -> String {
+    static func recognizeText(inImageAt url: URL) async throws -> RecognizedPage {
         try await Task.detached(priority: .userInitiated) {
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -20,16 +26,20 @@ enum TextRecognizer {
         }.value
     }
 
-    static func recognizeText(in image: CGImage) throws -> String {
+    static func recognizeText(in image: CGImage) throws -> RecognizedPage {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.automaticallyDetectsLanguage = true
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
-        let fragments = (request.results ?? []).compactMap { observation in
-            observation.topCandidates(1).first.map { TextLayout.Fragment(text: $0.string, box: observation.boundingBox) }
+        let candidates = (request.results ?? []).compactMap { observation in
+            observation.topCandidates(1).first.map { (candidate: $0, box: observation.boundingBox) }
         }
-        return TextLayout.lines(fragments).joined(separator: "\n")
+        let fragments = candidates.map { TextLayout.Fragment(text: $0.candidate.string, box: $0.box) }
+        let confidence = candidates.isEmpty
+            ? nil
+            : candidates.map { Double($0.candidate.confidence) }.reduce(0, +) / Double(candidates.count)
+        return RecognizedPage(text: TextLayout.lines(fragments).joined(separator: "\n"), confidence: confidence)
     }
 }
 

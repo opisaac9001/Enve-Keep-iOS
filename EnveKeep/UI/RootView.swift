@@ -4,6 +4,7 @@ struct RootView: View {
     @Environment(KeepStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(\.reminders) private var reminders
+    @Environment(QuickCapture.self) private var quickCapture
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -43,14 +44,27 @@ struct RootView: View {
         .task(id: store.data) {
             await reminders?.reschedule(store.data)
         }
+        .task(id: store.receiptPages) {
+            await store.backfillPageDigests()
+        }
+        .onAppear(perform: showQuickCapture)
+        .onChange(of: quickCapture.scanRequestedAt) { showQuickCapture() }
+        .onChange(of: quickCapture.sharedItems) { showQuickCapture() }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             store.refreshToday()
+            showQuickCapture()
             Task { await reminders?.reschedule(store.data) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
             store.refreshToday()
         }
+    }
+
+    /// Switches to Receipts for shared files or a shortcut, unless that would close something open.
+    private func showQuickCapture() {
+        quickCapture.refresh()
+        if quickCapture.needsAttention && !router.isPresentingModal { router.showReceipts() }
     }
 }
 
@@ -62,6 +76,9 @@ private extension View {
             case .subscription(let id): SubscriptionDetailView(subscriptionId: id)
             case .document(let id): DocumentDetailView(documentId: id)
             case .receipt(let id): ReceiptDetailView(receiptId: id)
+            case .receiptBrowse: ReceiptBrowseView()
+            case .receiptFacets(let kind): ReceiptFacetListView(kind: kind)
+            case .receipts(let filter): ReceiptResultsView(filter: filter)
             case .settings: SettingsView()
             }
         }

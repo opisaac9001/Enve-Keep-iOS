@@ -4,6 +4,7 @@ struct ReceiptEditorRequest: Identifiable {
     let id = UUID()
     var receiptId: Int64?
     var capture: ReceiptCapture?
+    var sharedItem: SharedInbox.Item?
 }
 
 struct ReceiptEditView: View {
@@ -17,6 +18,7 @@ struct ReceiptEditView: View {
             pages: request.receiptId.map { store.attachments(.receipt, $0) } ?? [],
             defaultCurrency: store.settings.defaultCurrency,
             capture: request.capture,
+            sharedItem: request.sharedItem,
             onSaved: onSaved
         )
     }
@@ -37,14 +39,31 @@ struct ReceiptItemDraft: Identifiable, Equatable {
     }
 
     var isBlank: Bool { [description, quantity, amount].allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty } }
-    var quantityIsValid: Bool { quantity.trimmingCharacters(in: .whitespaces).isEmpty || Money.parse(quantity) != nil }
+    var quantityIsValid: Bool { ReceiptForm.isValidQuantity(quantity) }
     var amountIsValid: Bool { ReceiptForm.isValidAmount(amount) }
+}
+
+struct ReceiptFieldDraft: Identifiable, Equatable {
+    var id = UUID()
+    var name = ""
+    var value = ""
+
+    init() {}
+
+    init(_ field: ReceiptField) {
+        name = field.name
+        value = field.value
+    }
+
+    var isBlank: Bool { [name, value].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+    var isValid: Bool { isBlank || !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 /// Editable receipt fields; amounts stay as typed text until saved.
 struct ReceiptForm: Equatable {
     var merchant = ""
     var purchaseDate: Day?
+    var purchaseTime: ClockTime?
     var currency: String
     var category = ""
     var tags = ""
@@ -55,12 +74,29 @@ struct ReceiptForm: Equatable {
     var total = ""
     var notes = ""
     var recognizedText: [String: String] = [:]
+    var pageConfidence: [String: Double] = [:]
+    var pageDigests: [String: String] = [:]
+    var storeAddress = ""
+    var storePhone = ""
+    var transactionId = ""
+    var paymentMethod = ""
+    var cardLastFour = ""
+    var origin = ""
+    var destination = ""
+    var fuelGrade = ""
+    var fuelVolume = ""
+    var fuelUnit: FuelUnit?
+    var fuelUnitPrice = ""
+    var pumpNumber = ""
+    var odometer = ""
+    var customFields: [ReceiptFieldDraft] = []
 
     init(_ receipt: Receipt?, defaultCurrency: String) {
         currency = receipt?.currency ?? defaultCurrency
         guard let receipt else { return }
         merchant = receipt.merchant
         purchaseDate = receipt.purchaseDate
+        purchaseTime = receipt.purchaseTime
         category = receipt.category
         tags = receipt.tags.joined(separator: ", ")
         items = receipt.items.map(ReceiptItemDraft.init)
@@ -70,6 +106,22 @@ struct ReceiptForm: Equatable {
         total = receipt.total.map(Money.formatForInput) ?? ""
         notes = receipt.notes
         recognizedText = receipt.recognizedText
+        pageConfidence = receipt.pageConfidence
+        pageDigests = receipt.pageDigests
+        storeAddress = receipt.storeAddress
+        storePhone = receipt.storePhone
+        transactionId = receipt.transactionId
+        paymentMethod = receipt.paymentMethod
+        cardLastFour = receipt.cardLastFour
+        origin = receipt.origin
+        destination = receipt.destination
+        fuelGrade = receipt.fuelGrade
+        fuelVolume = receipt.fuelVolume.map(Money.formatForInput) ?? ""
+        fuelUnit = receipt.fuelUnit
+        fuelUnitPrice = receipt.fuelUnitPrice.map(Money.formatForInput) ?? ""
+        pumpNumber = receipt.pumpNumber
+        odometer = receipt.odometer
+        customFields = receipt.customFields.map(ReceiptFieldDraft.init)
     }
 
     static func isValidAmount(_ text: String) -> Bool {
@@ -88,6 +140,30 @@ struct ReceiptForm: Equatable {
         for (field, value) in [(\ReceiptForm.subtotal, parsed.subtotal), (\.tax, parsed.tax), (\.tip, parsed.tip), (\.total, parsed.total)] {
             if self[keyPath: field].isEmpty, let value { self[keyPath: field] = Money.formatForInput(value) }
         }
+        if purchaseTime == nil { purchaseTime = parsed.purchaseTime }
+        let texts: [(WritableKeyPath<ReceiptForm, String>, String?)] = [
+            (\.storeAddress, parsed.storeAddress), (\.storePhone, parsed.storePhone), (\.transactionId, parsed.transactionId),
+            (\.paymentMethod, parsed.paymentMethod), (\.cardLastFour, parsed.cardLastFour), (\.fuelGrade, parsed.fuelGrade),
+            (\.pumpNumber, parsed.pumpNumber), (\.odometer, parsed.odometer),
+        ]
+        for (field, value) in texts where self[keyPath: field].trimmingCharacters(in: .whitespaces).isEmpty {
+            if let value { self[keyPath: field] = value }
+        }
+        if fuelVolume.isEmpty, let value = parsed.fuelVolume {
+            fuelVolume = Money.formatForInput(value)
+            fuelUnit = parsed.fuelUnit
+        }
+        if fuelUnitPrice.isEmpty, let value = parsed.fuelUnitPrice { fuelUnitPrice = Money.formatForInput(value) }
+        if category.trimmingCharacters(in: .whitespaces).isEmpty, parsed.isFuel { category = Receipt.fuelCategory }
+    }
+
+    var isFuel: Bool {
+        category.trimmingCharacters(in: .whitespaces).localizedCaseInsensitiveCompare(Receipt.fuelCategory) == .orderedSame
+            || ![fuelGrade, fuelVolume, fuelUnitPrice, pumpNumber, odometer].allSatisfy(\.isEmpty)
+    }
+
+    static func isValidQuantity(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespaces).isEmpty || Money.parse(text) != nil
     }
 
     var itemsSum: Decimal? {
@@ -106,6 +182,9 @@ struct ReceiptForm: Equatable {
             && [subtotal, tax, tip, total].allSatisfy(Self.isValidAmount)
             && items.allSatisfy { $0.quantityIsValid && $0.amountIsValid }
             && Money.isValidCurrency(currency)
+            && Receipt.isValidCardLastFour(cardLastFour.trimmingCharacters(in: .whitespaces))
+            && [fuelVolume, fuelUnitPrice].allSatisfy(Self.isValidQuantity)
+            && customFields.allSatisfy(\.isValid)
     }
 
     func receipt(updating original: Receipt?, today: Day) -> Receipt {
@@ -125,6 +204,25 @@ struct ReceiptForm: Equatable {
         receipt.total = Self.amount(total)
         receipt.notes = trimmed(notes)
         receipt.recognizedText = recognizedText
+        receipt.pageConfidence = pageConfidence
+        receipt.pageDigests = pageDigests
+        receipt.purchaseTime = purchaseTime
+        receipt.storeAddress = trimmed(storeAddress)
+        receipt.storePhone = trimmed(storePhone)
+        receipt.transactionId = trimmed(transactionId)
+        receipt.paymentMethod = trimmed(paymentMethod)
+        receipt.cardLastFour = trimmed(cardLastFour)
+        receipt.origin = trimmed(origin)
+        receipt.destination = trimmed(destination)
+        receipt.fuelGrade = trimmed(fuelGrade)
+        receipt.fuelVolume = Money.parse(fuelVolume)
+        receipt.fuelUnit = receipt.fuelVolume == nil ? nil : fuelUnit
+        receipt.fuelUnitPrice = Money.parse(fuelUnitPrice)
+        receipt.pumpNumber = trimmed(pumpNumber)
+        receipt.odometer = trimmed(odometer)
+        receipt.customFields = customFields.filter { !$0.isBlank }.map {
+            ReceiptField(name: trimmed($0.name), value: trimmed($0.value))
+        }
         return receipt
     }
 }
@@ -132,12 +230,13 @@ struct ReceiptForm: Equatable {
 private struct ReceiptEditForm: View {
     static let suggestedCategories: [String] = [
         String(localized: "Groceries"), String(localized: "Dining"), String(localized: "Travel"),
-        String(localized: "Fuel"), String(localized: "Shopping"), String(localized: "Household"),
+        Receipt.fuelCategory, String(localized: "Shopping"), String(localized: "Household"),
         String(localized: "Health"), String(localized: "Utilities"), String(localized: "Entertainment"),
         String(localized: "Business"),
     ]
 
     let original: Receipt?
+    let sharedItem: SharedInbox.Item?
     let onSaved: (Int64) -> Void
     private let initial: ReceiptForm
     @State private var form: ReceiptForm
@@ -150,12 +249,22 @@ private struct ReceiptEditForm: View {
     @State private var noTextFound = false
     @State private var showErrors = false
     @State private var confirmDiscard = false
+    @State private var confirmCancelShared = false
     @State private var errorMessage: String?
     @Environment(KeepStore.self) private var store
+    @Environment(QuickCapture.self) private var quickCapture
     @Environment(\.dismiss) private var dismiss
 
-    init(original: Receipt?, pages: [Attachment], defaultCurrency: String, capture: ReceiptCapture?, onSaved: @escaping (Int64) -> Void) {
+    init(
+        original: Receipt?,
+        pages: [Attachment],
+        defaultCurrency: String,
+        capture: ReceiptCapture?,
+        sharedItem: SharedInbox.Item?,
+        onSaved: @escaping (Int64) -> Void
+    ) {
         self.original = original
+        self.sharedItem = sharedItem
         self.onSaved = onSaved
         initial = ReceiptForm(original, defaultCurrency: defaultCurrency)
         _form = State(initialValue: initial)
@@ -174,9 +283,18 @@ private struct ReceiptEditForm: View {
         NavigationStack {
             Form {
                 pagesSection
+                reviewSection
                 detailsSection
+                ReceiptStoreSection(form: $form, showErrors: showErrors)
+                ReceiptTripSection(form: $form, places: places)
+                ReceiptFuelSection(form: $form, showErrors: showErrors)
                 itemsSection
                 totalsSection
+                ReceiptCustomFieldsSection(
+                    fields: $form.customFields,
+                    names: ReceiptOrganizer.suggestions(store.data.receipts.flatMap(\.customFields).map(\.name)),
+                    showErrors: showErrors
+                )
                 Section("Notes") {
                     NotesField(text: $form.notes)
                 }
@@ -185,9 +303,13 @@ private struct ReceiptEditForm: View {
             .navigationTitle(original == nil ? "New receipt" : "Edit receipt")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                EditToolbar(hasChanges: hasChanges, canSave: !busy, confirmDiscard: $confirmDiscard, onDiscard: discard, onSave: save)
+                if let sharedItem {
+                    sharedToolbar(sharedItem)
+                } else {
+                    EditToolbar(hasChanges: hasChanges, canSave: !busy, confirmDiscard: $confirmDiscard, onDiscard: discard, onSave: save)
+                }
             }
-            .interactiveDismissDisabled(hasChanges)
+            .interactiveDismissDisabled(hasChanges || sharedItem != nil)
             .receiptCapture($captureSource, errorMessage: $errorMessage) { capture in
                 addPages(capture, fillBlanks: false)
             }
@@ -197,6 +319,29 @@ private struct ReceiptEditForm: View {
                 pendingCapture = nil
                 addPages(capture, fillBlanks: true)
             }
+        }
+    }
+
+    /// Canceling never deletes a shared file without asking; it can wait in the list for later.
+    @ToolbarContentBuilder
+    private func sharedToolbar(_ item: SharedInbox.Item) -> some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button("Cancel") { confirmCancelShared = true }
+                .confirmationDialog("Keep this shared file?", isPresented: $confirmCancelShared, titleVisibility: .visible) {
+                    Button("Review later") {
+                        quickCapture.postpone(item)
+                        discard()
+                    }
+                    Button("Delete shared file", role: .destructive) {
+                        discard()
+                        quickCapture.finish(item)
+                    }
+                } message: {
+                    Text("Review later keeps it under Receipts. Deleting removes it from Enve Keep.")
+                }
+        }
+        ToolbarItem(placement: .confirmationAction) {
+            Button("Save", action: save).disabled(busy)
         }
     }
 
@@ -257,6 +402,24 @@ private struct ReceiptEditForm: View {
         }
     }
 
+    @ViewBuilder
+    private var reviewSection: some View {
+        let draft = form.receipt(updating: original, today: store.today)
+        let flags = ReceiptReview.unresolved(
+            ReceiptReview.flags(for: draft, pages: pages.visible.map(\.fileName), among: store.data.receipts),
+            in: draft
+        )
+        if !busy && !flags.isEmpty {
+            Section {
+                ForEach(flags) { ReviewFlagRow(flag: $0, currency: form.currency) }
+            } header: {
+                Text("Check before saving")
+            } footer: {
+                Text("Nothing is removed automatically. Saved receipts with open checks appear under Needs review.")
+            }
+        }
+    }
+
     private var detailsSection: some View {
         Section("Receipt") {
             TextField("Merchant", text: $form.merchant)
@@ -265,6 +428,7 @@ private struct ReceiptEditForm: View {
                 FieldError(text: String(localized: "Required"))
             }
             OptionalDateRow(title: String(localized: "Purchase date"), selection: $form.purchaseDate)
+            OptionalTimeRow(title: String(localized: "Time"), selection: $form.purchaseTime)
             NavigationLink {
                 CurrencyPicker(selection: $form.currency)
             } label: {
@@ -294,6 +458,10 @@ private struct ReceiptEditForm: View {
         return used + Self.suggestedCategories.filter { suggestion in
             !used.contains { $0.localizedCaseInsensitiveCompare(suggestion) == .orderedSame }
         }
+    }
+
+    private var places: [String] {
+        ReceiptOrganizer.suggestions(store.data.receipts.flatMap { [$0.origin, $0.destination] })
     }
 
     private var itemsSection: some View {
@@ -380,7 +548,7 @@ private struct ReceiptEditForm: View {
         let attachmentStore = store.attachmentStore
         importing += 1
         work.append(Task {
-            let (added, failed) = await capture.importPages(into: attachmentStore)
+            let (added, failed, reasons) = await capture.importPages(into: attachmentStore)
             importing -= 1
             guard !Task.isCancelled else {
                 attachmentStore.delete(added.map(\.fileName))
@@ -388,13 +556,16 @@ private struct ReceiptEditForm: View {
             }
             pages.added += added
             if failed > 0 {
-                errorMessage = String(localized: "\(Formats.count(failed, "page", "pages")) could not be added.")
+                errorMessage = ([String(localized: "\(Formats.count(failed, "page", "pages")) could not be added.")] + reasons)
+                    .joined(separator: " ")
             }
             recognizing += 1
             defer { recognizing -= 1 }
             for page in added {
-                let text = (try? await TextRecognizer.recognizeText(inImageAt: attachmentStore.url(for: page.fileName))) ?? ""
-                form.recognizedText[page.fileName] = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                form.pageDigests[page.fileName] = try? await attachmentStore.digest(of: page.fileName)
+                let recognized = try? await TextRecognizer.recognizeText(inImageAt: attachmentStore.url(for: page.fileName))
+                form.recognizedText[page.fileName] = (recognized?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                form.pageConfidence[page.fileName] = recognized?.confidence
             }
             let recognized = added.compactMap { form.recognizedText[$0.fileName] }.joined(separator: "\n")
             noTextFound = !added.isEmpty && recognized.isEmpty
@@ -414,6 +585,7 @@ private struct ReceiptEditForm: View {
         let receipt = form.receipt(updating: original, today: store.today)
         do {
             let id = try store.saveReceipt(receipt, added: pages.added, removed: pages.removed)
+            if let sharedItem { quickCapture.finish(sharedItem) }
             dismiss()
             onSaved(id)
         } catch {

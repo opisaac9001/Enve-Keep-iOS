@@ -10,6 +10,7 @@ struct EnveKeepApp: App {
             RootView()
                 .environment(appDelegate.store)
                 .environment(appDelegate.router)
+                .environment(QuickCapture.shared)
                 .environment(\.reminders, appDelegate.reminders)
         }
     }

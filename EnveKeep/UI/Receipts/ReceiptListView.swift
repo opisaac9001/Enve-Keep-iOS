@@ -6,7 +6,10 @@ extension ReceiptSort {
         case .newest: "Newest first"
         case .oldest: "Oldest first"
         case .highestTotal: "Highest total"
+        case .lowestTotal: "Lowest total"
         case .merchant: "Merchant"
+        case .location: "Store location"
+        case .route: "Trip route"
         }
     }
 }
@@ -22,53 +25,111 @@ extension ReceiptGrouping {
     }
 }
 
+extension ReceiptGroup {
+    func displayTitle(_ grouping: ReceiptGrouping) -> String {
+        if !title.isEmpty { return title }
+        return grouping == .category ? String(localized: "No category") : String(localized: "Other")
+    }
+}
+
+struct ReceiptOrganizePickers: View {
+    @Binding var sort: ReceiptSort
+    @Binding var grouping: ReceiptGrouping
+
+    var body: some View {
+        Picker(selection: $sort) {
+            ForEach(ReceiptSort.allCases, id: \.self) { Text($0.label).tag($0) }
+        } label: {
+            Label("Sort by", systemImage: "arrow.up.arrow.down")
+        }
+        .pickerStyle(.menu)
+        Picker(selection: $grouping) {
+            ForEach(ReceiptGrouping.allCases, id: \.self) { Text($0.label).tag($0) }
+        } label: {
+            Label("Group by", systemImage: "square.stack")
+        }
+        .pickerStyle(.menu)
+    }
+}
+
 struct ReceiptListView: View {
     @Environment(KeepStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(QuickCapture.self) private var quickCapture
     @State private var query = ""
     @State private var sort = ReceiptSort.newest
     @State private var grouping = ReceiptGrouping.month
     @State private var category: String?
     @State private var tag: String?
+    @State private var needsReviewOnly = false
+    @State private var exported: OpenedAttachment?
     @State private var captureSource: CaptureSource?
     @State private var editor: ReceiptEditorRequest?
+    @State private var showCaptureChoices = false
     @State private var pendingDelete: Receipt?
     @State private var errorMessage: String?
 
     var body: some View {
         let receipts = store.data.receipts
-        let filtered = receipts.filter { receipt in
-            receipt.matches(query)
-                && category.map { receipt.category == $0 } ?? true
-                && tag.map { receipt.tags.contains($0) } ?? true
-        }
+        let pending = ReceiptReview.pending(receipts, pages: store.receiptPages)
+        let filter = ReceiptFilter(query: query, facets: [category.map(ReceiptFacet.category), tag.map(ReceiptFacet.tag)].compactMap { $0 })
+        let filtered = receipts.filter { filter.includes($0) && (!needsReviewOnly || pending[$0.id] != nil) }
         let groups = ReceiptOrganizer.groups(filtered, sort: sort, grouping: grouping)
 
         List {
-            if category != nil || tag != nil {
+            if let item = quickCapture.sharedItems.first {
+                Button {
+                    openShared(item)
+                } label: {
+                    let count = quickCapture.sharedItems.count
+                    Label(count == 1 ? "1 shared file to review" : "\(count) shared files to review", systemImage: "tray.and.arrow.down.fill")
+                }
+                .accessibilityHint("Opens the next shared file as a new receipt")
+            }
+            if !receipts.isEmpty && query.isEmpty && !hasFilters {
+                NavigationLink(value: Route.receiptBrowse) {
+                    Label("Browse by category, route, merchant and more", systemImage: "square.grid.2x2")
+                }
+            }
+            if hasFilters {
                 activeFilters
+            } else if !pending.isEmpty {
+                Button {
+                    needsReviewOnly = true
+                } label: {
+                    Label {
+                        Text(pending.count == 1 ? "1 receipt needs review" : "\(pending.count) receipts need review")
+                    } icon: {
+                        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Color.keepSoon)
+                    }
+                }
+                .accessibilityHint("Shows only receipts that need review")
             }
             ForEach(groups) { group in
                 Section {
                     ForEach(group.receipts) { receipt in
                         NavigationLink(value: Route.receipt(receipt.id)) {
-                            ReceiptRow(receipt: receipt)
+                            ReceiptRow(receipt: receipt, needsReview: pending[receipt.id] != nil)
                         }
                         .swipeActions {
                             Button("Delete", systemImage: "trash") { pendingDelete = receipt }
                                 .tint(Color.keepPast)
+                            if pending[receipt.id] != nil {
+                                Button("Reviewed", systemImage: "checkmark") { markReviewed(receipt) }
+                                    .tint(.accentColor)
+                            }
                         }
                     }
                 } header: {
                     if grouping != .none {
-                        GroupHeader(title: groupTitle(group), totals: group.totals)
+                        GroupHeader(title: group.displayTitle(grouping), totals: group.totals)
                     }
                 }
             }
         }
         .keepListStyle()
         .overlay {
-            if receipts.isEmpty {
+            if receipts.isEmpty && quickCapture.sharedItems.isEmpty {
                 ContentUnavailableView {
                     Label("No receipts yet", systemImage: Receipt.symbol)
                 } description: {
@@ -81,6 +142,8 @@ struct ReceiptListView: View {
                     .foregroundStyle(Color.keepOnAccent)
                     Button("Enter manually") { editor = ReceiptEditorRequest() }
                 }
+            } else if needsReviewOnly && pending.isEmpty {
+                ContentUnavailableView("All caught up", systemImage: "checkmark.circle", description: Text("No receipts need review."))
             } else if filtered.isEmpty {
                 ContentUnavailableView("No matches", systemImage: "magnifyingglass", description: Text("Try a different search or filter."))
             }
@@ -89,7 +152,7 @@ struct ReceiptListView: View {
         .searchable(text: $query, prompt: "Search receipts and scanned text")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                if !receipts.isEmpty { organizeMenu(receipts) }
+                if !receipts.isEmpty { organizeMenu(receipts, pendingCount: pending.count, filtered: groups.flatMap(\.receipts)) }
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -107,9 +170,25 @@ struct ReceiptListView: View {
         .receiptCapture($captureSource, errorMessage: $errorMessage) { capture in
             editor = ReceiptEditorRequest(capture: capture)
         }
-        .sheet(item: $editor) { request in
-            ReceiptEditView(request: request) { router.receiptsPath.append(.receipt($0)) }
+        .confirmationDialog("Add receipt", isPresented: $showCaptureChoices, titleVisibility: .visible) {
+            Button("Photo Library") { captureSource = .photos }
+            Button("Choose Files") { captureSource = .files }
+            Button("Enter manually") { editor = ReceiptEditorRequest() }
+        } message: {
+            Text("Scanning with the camera isn't available on this device.")
         }
+        .sheet(item: $editor, onDismiss: openQuickCapture) { request in
+            ReceiptEditView(request: request) { id in
+                // Saving one shared file moves straight on to the next.
+                if request.sharedItem == nil || quickCapture.nextAutomaticItem == nil {
+                    router.receiptsPath.append(.receipt(id))
+                }
+            }
+        }
+        .onAppear(perform: openQuickCapture)
+        .onChange(of: quickCapture.scanRequestedAt) { openQuickCapture() }
+        .onChange(of: quickCapture.sharedItems) { openQuickCapture() }
+        .attachmentPresenter($exported)
         .confirmationDialog(
             "Delete \(pendingDelete?.merchant ?? "")?",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
@@ -123,41 +202,64 @@ struct ReceiptListView: View {
         .errorAlert($errorMessage)
     }
 
+    private func openQuickCapture() {
+        guard router.tab == .receipts, router.receiptsPath.isEmpty, editor == nil, captureSource == nil, !showCaptureChoices,
+              !router.isPresentingModal
+        else { return }
+        if quickCapture.consumeScanRequest() {
+            if DocumentScanner.isSupported { captureSource = .scanner } else { showCaptureChoices = true }
+        } else if let item = quickCapture.nextAutomaticItem {
+            openShared(item)
+        }
+    }
+
+    private func openShared(_ item: SharedInbox.Item) {
+        editor = ReceiptEditorRequest(capture: .files([item.file]), sharedItem: item)
+    }
+
+    private var hasFilters: Bool { category != nil || tag != nil || needsReviewOnly }
+
     private var activeFilters: some View {
-        HStack {
+        let reviewLabel = needsReviewOnly ? String(localized: "Needs review") : nil
+        return HStack {
             Image(systemName: "line.3.horizontal.decrease.circle.fill")
                 .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
-            Text([category, tag.map { "#\($0)" }].compactMap { $0 }.joined(separator: " · "))
+            Text([reviewLabel, category, tag.map { "#\($0)" }].compactMap { $0 }.joined(separator: " · "))
                 .lineLimit(1)
             Spacer()
             Button("Clear") {
                 category = nil
                 tag = nil
+                needsReviewOnly = false
             }
             .buttonStyle(.borderless)
         }
         .font(.subheadline)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(String(localized: "Filtered by \([category, tag].compactMap { $0 }.joined(separator: ", "))"))
+        .accessibilityLabel(String(localized: "Filtered by \([reviewLabel, category, tag].compactMap { $0 }.joined(separator: ", "))"))
     }
 
-    private func organizeMenu(_ receipts: [Receipt]) -> some View {
+    private func organizeMenu(_ receipts: [Receipt], pendingCount: Int, filtered: [Receipt]) -> some View {
         let categories = ReceiptOrganizer.categories(receipts)
         let tags = ReceiptOrganizer.tags(receipts)
         return Menu {
-            Picker(selection: $sort) {
-                ForEach(ReceiptSort.allCases, id: \.self) { Text($0.label).tag($0) }
-            } label: {
-                Label("Sort by", systemImage: "arrow.up.arrow.down")
+            Toggle(isOn: $needsReviewOnly) {
+                Label("Needs review (\(pendingCount))", systemImage: "exclamationmark.circle")
             }
-            .pickerStyle(.menu)
-            Picker(selection: $grouping) {
-                ForEach(ReceiptGrouping.allCases, id: \.self) { Text($0.label).tag($0) }
-            } label: {
-                Label("Group by", systemImage: "square.stack")
+            Section("Export CSV") {
+                Button("All receipts (\(receipts.count))", systemImage: "tablecells") {
+                    exportCSV(ReceiptOrganizer.groups(receipts, sort: sort, grouping: .none).flatMap(\.receipts))
+                }
+                if filtered.count != receipts.count {
+                    Button("Shown receipts (\(filtered.count))", systemImage: "line.3.horizontal.decrease") {
+                        exportCSV(filtered)
+                    }
+                    .disabled(filtered.isEmpty)
+                }
             }
-            .pickerStyle(.menu)
+            Button("Browse and filter", systemImage: "square.grid.2x2") { router.receiptsPath.append(.receiptBrowse) }
+            ReceiptOrganizePickers(sort: $sort, grouping: $grouping)
             if !categories.isEmpty {
                 Picker(selection: $category) {
                     Text("All categories").tag(String?.none)
@@ -178,16 +280,26 @@ struct ReceiptListView: View {
             }
         } label: {
             Label(
-                "Sort and filter",
-                systemImage: category == nil && tag == nil
-                    ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill"
+                "Sort, filter and export",
+                systemImage: hasFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
             )
         }
     }
 
-    private func groupTitle(_ group: ReceiptGroup) -> String {
-        if !group.title.isEmpty { return group.title }
-        return grouping == .category ? String(localized: "No category") : String(localized: "Other")
+    private func exportCSV(_ receipts: [Receipt]) {
+        do {
+            exported = OpenedAttachment(url: try ReceiptCSV.write(receipts, today: store.today), share: true)
+        } catch {
+            errorMessage = String(localized: "The CSV file could not be created. \(error.localizedDescription)")
+        }
+    }
+
+    private func markReviewed(_ receipt: Receipt) {
+        do {
+            try store.markReviewed(receipt.id)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func delete(_ receipt: Receipt) {
@@ -199,7 +311,7 @@ struct ReceiptListView: View {
     }
 }
 
-private struct GroupHeader: View {
+struct GroupHeader: View {
     let title: String
     let totals: [(currency: String, amount: Decimal)]
 
@@ -215,6 +327,7 @@ private struct GroupHeader: View {
 
 struct ReceiptRow: View {
     let receipt: Receipt
+    var needsReview = false
     @Environment(KeepStore.self) private var store
 
     var body: some View {
@@ -229,12 +342,27 @@ struct ReceiptRow: View {
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(receipt.merchant).font(.body.weight(.medium))
+                HStack(spacing: 4) {
+                    Text(receipt.merchant).font(.body.weight(.medium))
+                    if needsReview {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Color.keepSoon)
+                            .accessibilityLabel("Needs review")
+                    }
+                }
                 let subtitle = [
                     receipt.purchaseDate.map(Formats.date) ?? String(localized: "No date"),
                     receipt.category.isEmpty ? nil : receipt.category,
                 ].compactMap { $0 }.joined(separator: " · ")
                 Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                if let route = receipt.routeLabel {
+                    Label(route, systemImage: ReceiptFacetKind.route.symbol)
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 if !receipt.tags.isEmpty {
                     Text(receipt.tags.map { "#\($0)" }.joined(separator: " "))
                         .font(.caption)

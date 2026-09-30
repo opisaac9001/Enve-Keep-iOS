@@ -5,6 +5,19 @@ enum Formats {
         day.date().formatted(date: .abbreviated, time: .omitted)
     }
 
+    static func time(_ time: ClockTime) -> String {
+        time.date().formatted(date: .omitted, time: .shortened)
+    }
+
+    static func fuelVolume(_ volume: Decimal, unit: FuelUnit?) -> String {
+        [Money.formatForInput(volume), unit?.symbol].compactMap { $0 }.joined(separator: " ")
+    }
+
+    static func fuelUnitPrice(_ price: Decimal, currency: String, unit: FuelUnit?) -> String {
+        let amount = price.formatted(.currency(code: currency).precision(.fractionLength(2...3)))
+        return unit.map { "\(amount)/\($0.symbol)" } ?? amount
+    }
+
     static func relativeDays(_ days: Int) -> String {
         switch days {
         case 0: String(localized: "today")

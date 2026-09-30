@@ -57,11 +57,45 @@ struct ReceiptItem: Hashable, Sendable {
     var amount: Decimal?
 }
 
-/// Receipts are iOS-only and travel in version 2 backups, which Enve Keep for Android rejects as newer.
+/// A user-named value such as "Vehicle: Civic" or "Project: Q3 offsite".
+struct ReceiptField: Hashable, Sendable {
+    var name: String
+    var value: String
+}
+
+enum FuelUnit: String, Codable, CaseIterable, Sendable {
+    case gallons = "GALLONS"
+    case liters = "LITERS"
+}
+
+/// A wall-clock time as printed on a receipt, with no time zone.
+struct ClockTime: Hashable, Comparable, Sendable {
+    let hour: Int
+    let minute: Int
+
+    init?(hour: Int, minute: Int) {
+        guard (0..<24).contains(hour), (0..<60).contains(minute) else { return nil }
+        self.hour = hour
+        self.minute = minute
+    }
+
+    /// Parses `HH:mm`.
+    init?(iso: String) {
+        guard let match = iso.wholeMatch(of: /(\d{2}):(\d{2})/), let h = Int(match.1), let m = Int(match.2) else { return nil }
+        self.init(hour: h, minute: m)
+    }
+
+    var iso: String { String(format: "%02d:%02d", hour, minute) }
+
+    static func < (lhs: ClockTime, rhs: ClockTime) -> Bool { (lhs.hour, lhs.minute) < (rhs.hour, rhs.minute) }
+}
+
+/// Receipts are iOS-only and travel in version 3 backups, which Enve Keep for Android rejects as newer.
 struct Receipt: Identifiable, Hashable, Sendable {
     var id: Int64 = 0
     var merchant: String
     var purchaseDate: Day?
+    var purchaseTime: ClockTime?
     var currency: String
     var items: [ReceiptItem] = []
     var subtotal: Decimal?
@@ -73,6 +107,30 @@ struct Receipt: Identifiable, Hashable, Sendable {
     var notes = ""
     /// On-device OCR output per scanned page, keyed by the page attachment's file name.
     var recognizedText: [String: String] = [:]
+    /// Mean Vision confidence (0...1) per scanned page, keyed like `recognizedText`.
+    var pageConfidence: [String: Double] = [:]
+    /// SHA-256 of each stored page file, keyed like `recognizedText`, for spotting repeat scans.
+    var pageDigests: [String: String] = [:]
+    /// Products this receipt proves the purchase of. A product appears on at most one receipt.
+    var productIds: [Int64] = []
+    /// Review flags the user has marked as resolved; see `ReceiptReview`.
+    var resolvedFlags: [String] = []
+    var storeAddress = ""
+    var storePhone = ""
+    var transactionId = ""
+    var paymentMethod = ""
+    /// Digits only, and only when the receipt prints them.
+    var cardLastFour = ""
+    /// Where a trip started and ended; always entered by the user.
+    var origin = ""
+    var destination = ""
+    var fuelGrade = ""
+    var fuelVolume: Decimal?
+    var fuelUnit: FuelUnit?
+    var fuelUnitPrice: Decimal?
+    var pumpNumber = ""
+    var odometer = ""
+    var customFields: [ReceiptField] = []
     var addedOn: Day
 }
 
@@ -267,12 +325,43 @@ extension ReceiptItem: Codable {
     }
 }
 
+extension ClockTime: Codable {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let time = ClockTime(iso: raw) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid time \(raw)")
+        }
+        self = time
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(iso)
+    }
+}
+
+extension ReceiptField: Codable {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: JSONKey.self)
+        name = try c.required("name")
+        value = try c.value("value", default: "")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: JSONKey.self)
+        try c.put(name, "name")
+        try c.put(value, "value")
+    }
+}
+
 extension Receipt: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: JSONKey.self)
         id = try c.value("id", default: 0)
         merchant = try c.required("merchant")
         purchaseDate = try c.value("purchaseDate", default: nil)
+        purchaseTime = try c.value("purchaseTime", default: nil)
         currency = try c.required("currency")
         items = try c.value("items", default: [])
         subtotal = try c.amount("subtotal")
@@ -283,6 +372,24 @@ extension Receipt: Codable {
         tags = try c.value("tags", default: [])
         notes = try c.value("notes", default: "")
         recognizedText = try c.value("recognizedText", default: [:])
+        pageConfidence = try c.value("pageConfidence", default: [:])
+        pageDigests = try c.value("pageDigests", default: [:])
+        productIds = try c.value("productIds", default: [])
+        resolvedFlags = try c.value("resolvedFlags", default: [])
+        storeAddress = try c.value("storeAddress", default: "")
+        storePhone = try c.value("storePhone", default: "")
+        transactionId = try c.value("transactionId", default: "")
+        paymentMethod = try c.value("paymentMethod", default: "")
+        cardLastFour = try c.value("cardLastFour", default: "")
+        origin = try c.value("origin", default: "")
+        destination = try c.value("destination", default: "")
+        fuelGrade = try c.value("fuelGrade", default: "")
+        fuelVolume = try c.amount("fuelVolume")
+        fuelUnit = try c.value("fuelUnit", default: nil)
+        fuelUnitPrice = try c.amount("fuelUnitPrice")
+        pumpNumber = try c.value("pumpNumber", default: "")
+        odometer = try c.value("odometer", default: "")
+        customFields = try c.value("customFields", default: [])
         addedOn = try c.required("addedOn")
     }
 
@@ -291,6 +398,7 @@ extension Receipt: Codable {
         try c.put(id, "id")
         try c.put(merchant, "merchant")
         try c.put(purchaseDate, "purchaseDate")
+        try c.put(purchaseTime, "purchaseTime")
         try c.put(currency, "currency")
         try c.put(items, "items")
         try c.putAmount(subtotal, "subtotal")
@@ -301,6 +409,24 @@ extension Receipt: Codable {
         try c.put(tags, "tags")
         try c.put(notes, "notes")
         try c.put(recognizedText, "recognizedText")
+        try c.put(pageConfidence, "pageConfidence")
+        try c.put(pageDigests, "pageDigests")
+        try c.put(productIds, "productIds")
+        try c.put(resolvedFlags, "resolvedFlags")
+        try c.put(storeAddress, "storeAddress")
+        try c.put(storePhone, "storePhone")
+        try c.put(transactionId, "transactionId")
+        try c.put(paymentMethod, "paymentMethod")
+        try c.put(cardLastFour, "cardLastFour")
+        try c.put(origin, "origin")
+        try c.put(destination, "destination")
+        try c.put(fuelGrade, "fuelGrade")
+        try c.putAmount(fuelVolume, "fuelVolume")
+        try c.put(fuelUnit, "fuelUnit")
+        try c.putAmount(fuelUnitPrice, "fuelUnitPrice")
+        try c.put(pumpNumber, "pumpNumber")
+        try c.put(odometer, "odometer")
+        try c.put(customFields, "customFields")
         try c.put(addedOn, "addedOn")
     }
 }

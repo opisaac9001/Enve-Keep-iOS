@@ -14,14 +14,16 @@ enum ReceiptCapture: Sendable {
     case files([URL])
 
     /// Imports every page as JPEG, keeping the pages that succeed.
-    func importPages(into store: AttachmentStore) async -> (pages: [Attachment], failed: Int) {
+    func importPages(into store: AttachmentStore) async -> (pages: [Attachment], failed: Int, reasons: [String]) {
         var pages: [Attachment] = []
         var failed = 0
-        func add(_ work: () async throws -> Attachment?) async {
+        var reasons: [String] = []
+        func add(_ work: () async throws -> [Attachment]?) async {
             do {
-                if let page = try await work() { pages.append(page) } else { failed += 1 }
+                if let added = try await work() { pages += added } else { failed += 1 }
             } catch {
                 failed += 1
+                if !reasons.contains(error.localizedDescription) { reasons.append(error.localizedDescription) }
             }
         }
         switch self {
@@ -30,22 +32,22 @@ enum ReceiptCapture: Sendable {
             for (index, image) in images.enumerated() {
                 await add {
                     guard let data = image.jpegData(compressionQuality: 0.85) else { return nil }
-                    return try await store.importPhoto(data, displayName: "Scan \(stamp) page \(index + 1).jpg")
+                    return [try await store.importPhoto(data, displayName: "Scan \(stamp) page \(index + 1).jpg")]
                 }
             }
         case .photos(let items):
             for item in items {
                 await add {
                     guard let data = try await item.loadTransferable(type: Data.self) else { return nil }
-                    return try await store.importPhoto(data)
+                    return [try await store.importPhoto(data)]
                 }
             }
         case .files(let urls):
             for url in urls {
-                await add { try await store.importImage(at: url) }
+                await add { try await store.importReceiptPages(at: url) }
             }
         }
-        return (pages, failed)
+        return (pages, failed, reasons)
     }
 }
 
@@ -106,7 +108,7 @@ private struct ReceiptCaptureModifier: ViewModifier {
                 photoItems = []
                 onCapture(.photos(items))
             }
-            .fileImporter(isPresented: presented(.files), allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+            .fileImporter(isPresented: presented(.files), allowedContentTypes: [.image, .pdf], allowsMultipleSelection: true) { result in
                 switch result {
                 case .success(let urls) where !urls.isEmpty: onCapture(.files(urls))
                 case .success: break

@@ -1,11 +1,12 @@
 import Foundation
 import ZIPFoundation
 
-/// Version 2 keeps receipt pages separate so Android can reject the newer manifest cleanly.
+/// Receipt pages start in version 2; version 3 adds searchable receipt details.
 struct BackupManifest: Hashable, Sendable {
     static let format = "enve-keep-backup"
     static let androidVersion = 1
     static let receiptsVersion = 2
+    static let detailsVersion = 3
 
     var format = BackupManifest.format
     var version = BackupManifest.androidVersion
@@ -182,7 +183,7 @@ enum BackupArchive {
 
     static func validate(_ manifest: BackupManifest, files: Set<String>) throws {
         guard manifest.format == BackupManifest.format else { throw BackupError.invalid("Not an Enve Keep backup") }
-        guard manifest.version <= BackupManifest.receiptsVersion else {
+        guard manifest.version <= BackupManifest.detailsVersion else {
             throw BackupError.invalid("Backup was made by a newer version of Enve Keep")
         }
         guard manifest.version >= BackupManifest.receiptsVersion
@@ -225,9 +226,19 @@ enum BackupArchive {
         }
         for receipt in manifest.receipts {
             let pages = Set(manifest.receiptAttachments.filter { $0.ownerId == receipt.id }.map(\.fileName))
-            guard Money.isValidCurrency(receipt.currency), Set(receipt.recognizedText.keys).isSubset(of: pages) else {
-                throw BackupError.invalid("Invalid receipt \(receipt.merchant)")
-            }
+            guard Money.isValidCurrency(receipt.currency),
+                  Set(receipt.recognizedText.keys).isSubset(of: pages),
+                  Set(receipt.pageConfidence.keys).isSubset(of: pages),
+                  Set(receipt.pageDigests.keys).isSubset(of: pages),
+                  receipt.pageConfidence.values.allSatisfy({ (0...1).contains($0) }),
+                  receipt.customFields.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+                  Receipt.isValidCardLastFour(receipt.cardLastFour),
+                  [receipt.fuelVolume, receipt.fuelUnitPrice].allSatisfy({ ($0 ?? 0) >= 0 })
+            else { throw BackupError.invalid("Invalid receipt \(receipt.merchant)") }
+        }
+        let linkedProducts = manifest.receipts.flatMap(\.productIds)
+        guard Set(linkedProducts).count == linkedProducts.count, Set(linkedProducts).isSubset(of: productIds) else {
+            throw BackupError.invalid("Invalid receipt links")
         }
     }
 }

@@ -82,12 +82,18 @@ struct ReceiptBackupTests {
         try store.saveProduct(Product(name: "Blender", currency: "USD"), added: [
             EnveKeep.Attachment(ownerType: .product, ownerId: 0, displayName: "Manual.pdf",
                                 mimeType: "application/pdf", fileName: "manual.pdf", sizeBytes: 1),
-        ], removed: [])
+        ], removed: [], receiptId: nil)
         if receipt {
             try Data([9, 9]).write(to: store.attachmentStore.url(for: "scan.jpg"))
             var receipt = Receipt(merchant: "Kitchen Shop", purchaseDate: day("2026-09-01"), currency: "USD",
                                   total: Decimal(string: "49.99"), addedOn: day("2026-09-02"))
             receipt.recognizedText = ["scan.jpg": "KITCHEN SHOP\nTOTAL 49.99"]
+            receipt.purchaseTime = ClockTime(hour: 18, minute: 42)
+            receipt.origin = "San Francisco"
+            receipt.destination = "Los Angeles"
+            receipt.fuelVolume = Decimal(string: "10.543")
+            receipt.fuelUnit = .gallons
+            receipt.customFields = [ReceiptField(name: "Vehicle", value: "Civic"), ReceiptField(name: "Vehicle", value: "")]
             try store.saveReceipt(receipt, added: [
                 EnveKeep.Attachment(ownerType: .product, ownerId: 0, displayName: "Scan.jpg",
                                     mimeType: "image/jpeg", fileName: "scan.jpg", sizeBytes: 2),
@@ -110,11 +116,11 @@ struct ReceiptBackupTests {
         #expect(json.keys.sorted() == ["attachments", "documents", "exportedAt", "format", "products", "settings", "subscriptions", "version"])
     }
 
-    @Test func exportWithReceiptsIsVersionTwoAndKeepsVersionOneShapeReadable() async throws {
+    @Test func exportWithReceiptsIsVersionThreeAndKeepsVersionOneShapeReadable() async throws {
         let store = try storeWithProductAndReceipt(receipt: true)
         let json = try manifestJSON(in: try await BackupService(store: store).export())
 
-        #expect(json["version"] as? Int == 2)
+        #expect(json["version"] as? Int == 3)
         // Android's version 1 decoder must still parse every known key so it reaches its version check.
         let attachments = json["attachments"] as! [[String: Any]]
         #expect(attachments.map { $0["ownerType"] as? String } == ["PRODUCT"])
@@ -127,7 +133,7 @@ struct ReceiptBackupTests {
         #expect((receipt["recognizedText"] as? [String: String])?["scan.jpg"] == "KITCHEN SHOP\nTOTAL 49.99")
     }
 
-    @Test func versionTwoRoundTripsThroughImport() async throws {
+    @Test func versionThreeRoundTripsThroughImport() async throws {
         let store = try storeWithProductAndReceipt(receipt: true)
         let service = BackupService(store: store)
         let exported = try await service.export()

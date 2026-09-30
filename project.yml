@@ -15,6 +15,8 @@ settings:
     SWIFT_VERSION: "6.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
 
 targets:
   EnveKeep:
@@ -22,19 +24,24 @@ targets:
     platform: iOS
     sources:
       - path: EnveKeep
+      - path: Shared
     dependencies:
       - package: ZIPFoundation
+      - target: EnveKeepShare
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.enve.keep
         PRODUCT_NAME: EnveKeep
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         GENERATE_INFOPLIST_FILE: NO
+    entitlements:
+      path: EnveKeep/EnveKeep.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.enve.keep
     info:
       path: EnveKeep/Info.plist
       properties:
@@ -51,6 +58,40 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIFileSharingEnabled: false
+
+  EnveKeepShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.enve.keep.share
+        PRODUCT_NAME: EnveKeepShare
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        GENERATE_INFOPLIST_FILE: NO
+    entitlements:
+      path: ShareExtension/ShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.enve.keep
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Save to Enve Keep
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule: >-
+              SUBQUERY(extensionItems, $item, SUBQUERY($item.attachments, $attachment,
+              ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "com.adobe.pdf"
+              OR ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image").@count > 0).@count > 0
 
   EnveKeepTests:
     type: bundle.unit-test

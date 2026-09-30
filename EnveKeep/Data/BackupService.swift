@@ -18,11 +18,11 @@ struct BackupService {
     private var stagingRoot: URL { store.root.appending(path: "import-staging", directoryHint: .isDirectory) }
     private nonisolated static let previousName = "attachments-previous"
 
-    /// Writes the Android-compatible version 1 format unless receipts require version 2.
+    /// Writes Android-compatible version 1 without receipts; detailed receipts use version 3.
     func export() async throws -> URL {
         let data = store.data
         let manifest = BackupManifest(
-            version: data.receipts.isEmpty ? BackupManifest.androidVersion : BackupManifest.receiptsVersion,
+            version: data.receipts.isEmpty ? BackupManifest.androidVersion : BackupManifest.detailsVersion,
             exportedAt: Date.now.formatted(.iso8601),
             products: data.products,
             subscriptions: data.subscriptions,

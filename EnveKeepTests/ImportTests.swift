@@ -9,7 +9,7 @@ struct ImportTests {
         try Data([7, 7, 7]).write(to: store.attachmentStore.url(for: "receipt.pdf"))
         let receipt = EnveKeep.Attachment(ownerType: .product, ownerId: 0, displayName: "Receipt.pdf",
                                           mimeType: "application/pdf", fileName: "receipt.pdf", sizeBytes: 3)
-        try store.saveProduct(Product(name: "Laptop", currency: "USD"), added: [receipt], removed: [])
+        try store.saveProduct(Product(name: "Laptop", currency: "USD"), added: [receipt], removed: [], receiptId: nil)
         try store.updateSettings { $0.reminderPromptDismissed = false }
         return (store, store.data.attachments[0])
     }

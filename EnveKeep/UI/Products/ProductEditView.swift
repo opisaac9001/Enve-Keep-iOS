@@ -2,13 +2,18 @@ import SwiftUI
 
 struct ProductEditView: View {
     let productId: Int64?
+    /// Prefilled values and receipt link for a new product.
+    var draft: Product?
+    var receiptId: Int64?
     let onSaved: (Int64) -> Void
     @Environment(KeepStore.self) private var store
 
     var body: some View {
         ProductEditForm(
             original: productId.flatMap(store.product),
+            draft: draft,
             attachments: productId.map { store.attachments(.product, $0) } ?? [],
+            receiptId: productId.map { store.receiptCovering($0)?.id } ?? receiptId,
             defaultCurrency: store.settings.defaultCurrency,
             onSaved: onSaved
         )
@@ -26,9 +31,11 @@ private struct ProductForm: Equatable {
     var currency: String
     var warrantyExpires: Day?
     var notes = ""
+    var receiptId: Int64?
 
-    init(_ product: Product?, defaultCurrency: String) {
+    init(_ product: Product?, receiptId: Int64?, defaultCurrency: String) {
         currency = product?.currency ?? defaultCurrency
+        self.receiptId = receiptId
         guard let product else { return }
         name = product.name
         brand = product.brand
@@ -57,10 +64,17 @@ private struct ProductEditForm: View {
     @Environment(KeepStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
-    init(original: Product?, attachments: [Attachment], defaultCurrency: String, onSaved: @escaping (Int64) -> Void) {
+    init(
+        original: Product?,
+        draft: Product?,
+        attachments: [Attachment],
+        receiptId: Int64?,
+        defaultCurrency: String,
+        onSaved: @escaping (Int64) -> Void
+    ) {
         self.original = original
         self.onSaved = onSaved
-        initial = ProductForm(original, defaultCurrency: defaultCurrency)
+        initial = ProductForm(original ?? draft, receiptId: receiptId, defaultCurrency: defaultCurrency)
         _form = State(initialValue: initial)
         _attachments = State(initialValue: AttachmentDraft(existing: attachments))
     }
@@ -108,10 +122,25 @@ private struct ProductEditForm: View {
                         Text("This is before the purchase date").foregroundStyle(Color.keepSoon)
                     }
                 }
+                Section {
+                    NavigationLink {
+                        ReceiptPicker(selection: form.receiptId) { form.receiptId = $0 }
+                    } label: {
+                        if let receipt = form.receiptId.flatMap(store.receipt) {
+                            ReceiptRow(receipt: receipt)
+                        } else {
+                            Label("Link a saved receipt", systemImage: Receipt.symbol)
+                        }
+                    }
+                } header: {
+                    Text("Receipt")
+                } footer: {
+                    Text("A receipt can cover several products. Its scans stay with the receipt and aren't copied.")
+                }
                 Section("Notes") {
                     NotesField(text: $form.notes)
                 }
-                AttachmentEditorSection(title: "Receipts and files", draft: $attachments)
+                AttachmentEditorSection(title: "Files and photos", draft: $attachments)
             }
             .navigationTitle(original == nil ? "New product" : "Edit product")
             .navigationBarTitleDisplayMode(.inline)
@@ -144,7 +173,9 @@ private struct ProductEditForm: View {
         product.warrantyExpires = form.warrantyExpires
         product.notes = form.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            let id = try store.saveProduct(product, added: attachments.added, removed: attachments.removed)
+            let id = try store.saveProduct(
+                product, added: attachments.added, removed: attachments.removed, receiptId: form.receiptId
+            )
             dismiss()
             onSaved(id)
         } catch {

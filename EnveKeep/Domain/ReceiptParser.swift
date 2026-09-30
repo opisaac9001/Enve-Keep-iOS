@@ -10,6 +10,20 @@ struct ParsedReceipt: Equatable, Sendable {
     var tax: Decimal?
     var tip: Decimal?
     var total: Decimal?
+    var purchaseTime: ClockTime?
+    var storeAddress: String?
+    var storePhone: String?
+    var transactionId: String?
+    var paymentMethod: String?
+    var cardLastFour: String?
+    /// Set only on strong evidence, such as a volume with a pump number or a price per gallon.
+    var isFuel = false
+    var fuelGrade: String?
+    var fuelVolume: Decimal?
+    var fuelUnit: FuelUnit?
+    var fuelUnitPrice: Decimal?
+    var pumpNumber: String?
+    var odometer: String?
 }
 
 /// Reads two-decimal amounts without treating summaries or payment lines as items.
@@ -17,9 +31,12 @@ enum ReceiptParser {
     static func parse(_ text: String, today: Day, locale: Locale = .current, defaultCurrency: String) -> ParsedReceipt {
         let lines = text.components(separatedBy: .newlines).map(normalize).filter { !$0.isEmpty }.map(Line.init)
         var result = ParsedReceipt()
-        result.merchant = merchant(in: lines)
-        result.purchaseDate = purchaseDate(in: lines.map(\.text), today: today, locale: locale)
+        let merchant = merchant(in: lines)
+        result.merchant = merchant?.name
+        let date = purchaseDate(in: lines.map(\.text), today: today, locale: locale)
+        result.purchaseDate = date?.day
         result.currency = currency(in: text, defaultCurrency: defaultCurrency)
+        readDetails(lines, merchantLine: merchant?.index, dateLine: date?.line, into: &result)
 
         var subtotal: Decimal?
         var taxes: [(keyword: String, value: Decimal)] = []
@@ -150,9 +167,9 @@ enum ReceiptParser {
 
     // MARK: - Header fields
 
-    private static func merchant(in lines: [Line]) -> String? {
+    private static func merchant(in lines: [Line]) -> (index: Int, name: String)? {
         let bodyStart = lines.firstIndex { !$0.amounts.isEmpty } ?? lines.count
-        for line in lines.prefix(min(8, bodyStart)) {
+        for (index, line) in lines.prefix(min(8, bodyStart)).enumerated() {
             var candidate = line.text
             if let welcome = candidate.range(of: #"^welcome to\s+"#, options: [.regularExpression, .caseInsensitive]) {
                 candidate.removeSubrange(welcome)
@@ -163,15 +180,15 @@ enum ReceiptParser {
             guard letters >= 3, digits < 5, candidate.first?.isNumber == false, !candidate.contains(":"),
                   !Patterns.merchantJunk.matches(folded), dateMatch(in: candidate) == nil
             else { continue }
-            return candidate.trimmingCharacters(in: CharacterSet(charactersIn: " *#-=_~.,"))
+            return (index, candidate.trimmingCharacters(in: CharacterSet(charactersIn: " *#-=_~.,")))
         }
         return nil
     }
 
-    private static func purchaseDate(in lines: [String], today: Day, locale: Locale) -> Day? {
+    private static func purchaseDate(in lines: [String], today: Day, locale: Locale) -> (day: Day, line: Int)? {
         let monthFirst = localeIsMonthFirst(locale)
         let latest = today.adding(days: 1)
-        for line in lines where !Patterns.notPurchaseDate.matches(fold(line)) {
+        for (index, line) in lines.enumerated() where !Patterns.notPurchaseDate.matches(fold(line)) {
             guard let match = dateMatch(in: line) else { continue }
             let resolved: Day? = switch match {
             case .ymd(let y, let m, let d): Day(year: y, month: m, day: d)
@@ -181,7 +198,7 @@ enum ReceiptParser {
                 else if b > 12 { Day(year: y, month: a, day: b) }
                 else { monthFirst ? Day(year: y, month: a, day: b) : Day(year: y, month: b, day: a) }
             }
-            if let resolved, resolved.year >= 2000, resolved <= latest { return resolved }
+            if let resolved, resolved.year >= 2000, resolved <= latest { return (resolved, index) }
         }
         return nil
     }
@@ -215,6 +232,152 @@ enum ReceiptParser {
         let months = ["jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "mai": 5, "jun": 6, "jul": 7, "aug": 8,
                       "sep": 9, "oct": 10, "okt": 10, "nov": 11, "dec": 12, "dez": 12]
         return months[String(name.prefix(3))]
+    }
+
+    // MARK: - Printed details
+
+    private static func readDetails(_ lines: [Line], merchantLine: Int?, dateLine: Int?, into result: inout ParsedReceipt) {
+        let texts = lines.map(\.text)
+        result.storeAddress = storeAddress(in: lines, skipping: merchantLine)
+        result.storePhone = storePhone(in: lines)
+        result.transactionId = texts.lazy.compactMap { Patterns.transactionId.groups(in: $0)?[1] }.first
+        result.purchaseTime = purchaseTime(in: texts, dateLine: dateLine)
+        (result.paymentMethod, result.cardLastFour) = payment(in: lines)
+        result.odometer = texts.lazy.compactMap { Patterns.odometer.groups(in: $0)?[2] }.first
+            .map { $0.filter(\.isNumber) }
+        readFuel(texts, into: &result)
+    }
+
+    /// Street and city lines in the header, next to each other; nothing is inferred from the merchant name.
+    private static func storeAddress(in lines: [Line], skipping merchantLine: Int?) -> String? {
+        let bodyStart = lines.firstIndex { !$0.amounts.isEmpty } ?? lines.count
+        var parts: [String] = []
+        for (index, line) in lines.prefix(min(10, bodyStart)).enumerated() where index != merchantLine {
+            let text = line.text
+            let isStreet = Patterns.street.matches(text)
+            let isCity = Patterns.cityLine.matches(text) || (!parts.isEmpty && Patterns.postalCity.matches(text))
+            if isStreet || isCity {
+                parts.append(text.trimmingCharacters(in: CharacterSet(charactersIn: " ,")))
+            } else if !parts.isEmpty {
+                break
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    private static func storePhone(in lines: [Line]) -> String? {
+        let texts = lines.map(\.text)
+        let labeled = texts.lazy.compactMap { Patterns.labeledPhone.groups(in: $0)?[1] }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { (7...15).contains($0.filter(\.isNumber).count) }
+        if let labeled { return labeled }
+        return lines.lazy.filter { $0.lineAmounts.isEmpty }
+            .compactMap { Patterns.northAmericanPhone.groups(in: $0.text)?[0] ?? Patterns.internationalPhone.groups(in: $0.text)?[0] }
+            .first { (10...15).contains($0.filter(\.isNumber).count) }
+    }
+
+    /// Only a time on the purchase date's line or on a line labeled as a time.
+    private static func purchaseTime(in lines: [String], dateLine: Int?) -> ClockTime? {
+        let candidates = (dateLine.map { [lines[$0]] } ?? []) + lines.filter { Patterns.timeLabel.matches(fold($0)) }
+        for line in candidates {
+            guard let g = Patterns.time.groups(in: line), var hour = Int(g[1]), let minute = Int(g[2]) else { continue }
+            switch g[3].lowercased() {
+            case "a":
+                guard (1...12).contains(hour) else { continue }
+                if hour == 12 { hour = 0 }
+            case "p":
+                guard (1...12).contains(hour) else { continue }
+                if hour != 12 { hour += 12 }
+            default:
+                break
+            }
+            if let time = ClockTime(hour: hour, minute: minute) { return time }
+        }
+        return nil
+    }
+
+    /// Payment is read from the summary and tender lines, plus any line with a masked card number.
+    private static func payment(in lines: [Line]) -> (method: String?, lastFour: String?) {
+        let summaryStart = lines.firstIndex { classify($0).isSummary } ?? lines.count
+        var method: String?
+        var lastFour: String?
+        for (index, line) in lines.enumerated() {
+            let masked = Patterns.maskedCard.groups(in: line.text)?[1]
+            guard index >= summaryStart || masked != nil else { continue }
+            if lastFour == nil { lastFour = masked }
+            if method == nil {
+                let found = Patterns.paymentMethod.allGroups(in: fold(line.text)).compactMap { paymentNames[Search.key($0[1])] }
+                method = found.min { $0.rank < $1.rank }?.name
+            }
+        }
+        return (method, lastFour)
+    }
+
+    private static let paymentNames: [String: (name: String, rank: Int)] = [
+        "visa": ("Visa", 0), "mastercard": ("Mastercard", 0), "master card": ("Mastercard", 0),
+        "amex": ("American Express", 0), "american express": ("American Express", 0), "discover": ("Discover", 0),
+        "diners": ("Diners Club", 0), "jcb": ("JCB", 0), "unionpay": ("UnionPay", 0), "interac": ("Interac", 0),
+        "maestro": ("Maestro", 0), "girocard": ("girocard", 0), "apple pay": ("Apple Pay", 1),
+        "google pay": ("Google Pay", 1), "samsung pay": ("Samsung Pay", 1), "paypal": ("PayPal", 1),
+        "debit": ("Debit", 2), "credit": ("Credit", 2), "cash": ("Cash", 3),
+    ]
+
+    private static func readFuel(_ lines: [String], into result: inout ParsedReceipt) {
+        let folded = lines.map(fold)
+        let whole = folded.joined(separator: "\n")
+        var volume: (value: Decimal, unit: FuelUnit?, line: Int)?
+        for (index, line) in folded.enumerated() where volume == nil {
+            if let g = Patterns.gallonsVolume.groups(in: line) {
+                volume = (decimal(g[1]), .gallons, index)
+            } else if let g = Patterns.litersVolume.groups(in: line) {
+                volume = (decimal(g[1]), .liters, index)
+            } else if let g = Patterns.labeledVolume.groups(in: line) {
+                volume = (decimal(g[2]), unit(named: g[1]), index)
+            }
+        }
+        // A price counts as fuel evidence when it is per volume, sits on the volume line or has three decimals.
+        var unitPrice: (value: Decimal, unit: FuelUnit?, isFuelPrice: Bool)?
+        if let g = Patterns.perVolumePrice.groups(in: whole) {
+            unitPrice = (decimal(g[1]), unit(named: g[2]), true)
+        } else if let g = Patterns.labeledUnitPrice.groups(in: whole) {
+            unitPrice = (decimal(g[3]), g[2].isEmpty ? nil : unit(named: g[2]), !g[2].isEmpty || g[3].suffix(4).first.map { ".,".contains($0) } == true)
+        } else if let volume, let g = Patterns.atPrice.groups(in: folded[volume.line]) {
+            unitPrice = (decimal(g[1]), nil, true)
+        }
+        let pump = folded.lazy.compactMap { Patterns.pump.groups(in: $0).map { $0[1].isEmpty ? $0[2] : $0[1] } }.first
+        let keyword = Patterns.fuelKeyword.matches(whole)
+        let fuelPrice = unitPrice?.isFuelPrice == true
+
+        result.isFuel = (volume != nil && (pump != nil || fuelPrice || keyword))
+            || (pump != nil && keyword)
+            || (unitPrice?.unit != nil && keyword)
+        guard result.isFuel else { return }
+
+        let unit = volume?.unit ?? unitPrice?.unit
+        if let volume, let unit {
+            result.fuelVolume = volume.value
+            result.fuelUnit = unit
+        }
+        result.fuelUnitPrice = unitPrice?.value
+        result.pumpNumber = pump
+        // Grade words like "plus" or "super" only count on a line that is clearly about the fuel.
+        let fuelLines = lines.indices.filter { index in
+            index == volume?.line || Patterns.fuelContext.matches(folded[index])
+        }
+        let grade = fuelLines.lazy.compactMap { Patterns.grade.groups(in: lines[$0])?[1] }.first
+            ?? lines.lazy.compactMap { Patterns.strongGrade.groups(in: $0)?[1] }.first
+        result.fuelGrade = grade.map { $0.capitalized }
+    }
+
+    private static func unit(named name: String) -> FuelUnit? {
+        let name = name.lowercased()
+        if name.hasPrefix("g") { return .gallons }
+        if name.hasPrefix("l") { return .liters }
+        return nil
+    }
+
+    private static func decimal(_ text: String) -> Decimal {
+        Decimal(string: text.replacingOccurrences(of: ",", with: "."), locale: Locale(identifier: "en_US_POSIX")) ?? 0
     }
 
     private static func localeIsMonthFirst(_ locale: Locale) -> Bool {
@@ -429,6 +592,52 @@ private enum Patterns {
     static let dayFirstDate = TextPattern(
         #"\b(\d{1,2})\.?\s+(jan|feb|mar|apr|may|mai|jun|jul|aug|sep|oct|okt|nov|dec|dez)[a-z]*\.?,?\s+(\d{4}|\d{2})\b"#
     )
+
+    static let street = TextPattern(
+        #"^\d{1,6}[a-z]?\s+(?:[nsew]\.?\s+)?[\p{L}0-9][\p{L}0-9 .'-]*\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|hwy|highway|ln|lane|way|pkwy|parkway|ct|court|pl|place|plaza|sq|square|ter|terrace|cir|circle|trl|trail|rte|route|expy|fwy|freeway|pike|tpke)\b\.?"#
+            + #"|^\d{1,5}[a-z]?,?\s+(rue|avenue|boulevard|bd|chemin|allee|allée|via|viale|piazza|calle|avenida|carrer)\b"#
+            + #"|^[\p{L}][\p{L}.' -]*(straße|strasse|str\.|weg|platz|gasse|allee|ring|damm|ufer|laan|straat|plein|gracht)\s*\d{1,4}[a-z]?\b"#
+    )
+    /// "Portland, OR 97201", "Toronto ON M5V 2T6" or a UK postcode.
+    static let cityLine = TextPattern(
+        #"^[\p{L}][\p{L} .'-]*,?\s+[A-Z]{2}\s+(\d{5}(-\d{4})?|[A-Z]\d[A-Z]\s?\d[A-Z]\d)$|\b[A-Z]{1,2}\d[A-Z\d]?\s\d[A-Z]{2}$"#,
+        caseInsensitive: false
+    )
+    /// "10115 Berlin"; only trusted right after a street line.
+    static let postalCity = TextPattern(#"^(?:[A-Z]{1,2}-)?\d{4,5}\s+[\p{L}][\p{L} .'-]+$"#)
+    static let labeledPhone = TextPattern(#"\b(?:tel|phone|ph|telefon|telephone|téléphone|call)\b\.?\s*:?\s*(\+?[\d(][\d\s().\-/]{5,}\d)"#)
+    static let northAmericanPhone = TextPattern(#"(?<![\d.])(?:\+?1[\s.-])?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}(?![\d.])"#)
+    static let internationalPhone = TextPattern(#"(?<!\d)\+\d{1,3}[\s\d().-]{6,}\d"#)
+    static let transactionId = TextPattern(
+        #"\b(?:transaction|trans|tran|txn|trx|receipt|rcpt|invoice|inv|order|ticket|tkt|ref|reference|seq|bon|beleg)\b\.?(?:\s*(?:#|no\.?|nr\.?|num(?:ber)?|id|-nr\.?))?\s*[:#.]?\s*((?=[A-Z-]*\d)[A-Z0-9][A-Z0-9-]{2,31})\b(?![.,]\d)"#
+    )
+    static let timeLabel = TextPattern(#"\b(time|zeit|heure|hora|ora|uhrzeit)\b"#)
+    static let time = TextPattern(#"(?<![\d:])(\d{1,2}):([0-5]\d)(?::[0-5]\d)?(?:\s*([ap])\.?\s?m\b\.?)?(?![\d:])"#)
+    static let paymentMethod = TextPattern(
+        #"\b(visa|master\s?card|amex|american express|discover|diners|jcb|unionpay|interac|maestro|girocard|apple pay|google pay|samsung pay|paypal|debit|credit|cash)\b"#
+    )
+    static let maskedCard = TextPattern(#"(?<![\p{L}\d*•])[*xX•]{2,}[\s*xX•-]*(\d{4})(?!\d)"#, caseInsensitive: false)
+    static let odometer = TextPattern(
+        #"\b(odometer|odo|mileage|km[- ]?stand|kilometerstand)\b\.?\s*:?\s*(\d{1,3}(?:[,.' ]\d{3})+|\d{1,7})(?![\d.,])"#
+    )
+
+    static let fuelKeyword = TextPattern(#"\b(fuel|gasoline|petrol|diesel|unleaded|benzin|gazole|gasoil|carburant)\b"#)
+    static let fuelContext = TextPattern(#"\b(fuel|gas|grade|product|pump|gallons?|gal|litres?|liters?|ltr|unleaded|diesel|octane)\b"#)
+    static let gallonsVolume = TextPattern(#"(?<![\d.,])(\d{1,3}[.,]\d{2,3})\s*(?:gal|gals|gallons?|g)\b"#)
+    static let litersVolume = TextPattern(#"(?<![\d.,])(\d{1,3}[.,]\d{2,3})\s*(?:l|lt|ltr|ltrs|litres?|liters?)\b"#)
+    static let labeledVolume = TextPattern(#"\b(gallons?|gals?|litres?|liters?|ltrs?|volume|vol|menge)\b\.?\s*:?\s*(\d{1,3}[.,]\d{2,3})(?![\d.,])"#)
+    static let perVolumePrice = TextPattern(#"(?<![\d.,])(\d{1,2}[.,]\d{2,3})\s*/\s*(gal|gallon|g|l|ltr|litre|liter)\b"#)
+    static let labeledUnitPrice = TextPattern(
+        #"\b(price|ppg|ppl|unit price|preis)\b\s*(?:/\s*(gal|g|l|ltr|litre|liter)\b)?\s*:?\s*[$€£]?\s*(\d{1,2}[.,]\d{2,3})(?![\d.,])"#
+    )
+    static let atPrice = TextPattern(#"@\s*[$€£]?\s*(\d{1,2}[.,]\d{2,3})(?![\d.,])"#)
+    static let pump = TextPattern(
+        #"\b(?:pump|zapfsaule|saule)\s*(?:(?:#|no\.?|nr\.?|number)\s*:?|:)\s*(\d{1,3})\b|^(?:pump|zapfsaule|saule)\s+(\d{1,3})$"#
+    )
+    static let grade = TextPattern(
+        #"\b(super unleaded|premium unleaded|unleaded plus|super\s?(?:plus|e10|e5)|unleaded|regular|mid-?grade|premium|plus|super|diesel|e85|e15|e10|v-power|supreme|ultimate)\b"#
+    )
+    static let strongGrade = TextPattern(#"\b(super unleaded|premium unleaded|unleaded plus|super\s?(?:plus|e10|e5)|unleaded|mid-?grade|diesel|e85|e15)\b"#)
 
     static let currencyCodePattern = #"\b(USD|EUR|GBP|CAD|AUD|NZD|CHF|JPY|CNY|SEK|NOK|DKK|PLN|CZK|HUF|INR|MXN|BRL|ZAR|SGD|HKD|KRW|TRY|ILS)\b"#
     static let currencyCode = TextPattern(currencyCodePattern, caseInsensitive: false)

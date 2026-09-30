@@ -58,7 +58,10 @@ struct TextRecognizerTests {
     }
 
     @Test func recognizesRenderedReceiptRows() throws {
-        let text = try TextRecognizer.recognizeText(in: renderReceipt())
+        let page = try TextRecognizer.recognizeText(in: renderReceipt())
+        let text = page.text
+        // Clean printed text must not be reported as hard to read.
+        #expect(try #require(page.confidence) >= ReceiptReview.uncertainConfidence)
         let lines = text.components(separatedBy: .newlines).map { $0.uppercased() }
 
         #expect(lines.contains { $0.contains("COFFEE") && $0.contains("3.50") })
